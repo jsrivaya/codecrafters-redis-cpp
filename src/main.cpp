@@ -47,8 +47,24 @@ int main(int argc, char **argv) {
   int client_addr_len = sizeof(client_addr);
   std::cout << "Waiting for a client to connect...\n";
   
-  accept(server_fd, (struct sockaddr *) &client_addr, (socklen_t *) &client_addr_len);
+  auto client_fd = accept(server_fd, (struct sockaddr *) &client_addr, (socklen_t *) &client_addr_len);
   std::cout << "Client connected\n";
+
+  char buffer[256];
+  bzero(buffer, 256);
+  auto n = read(client_fd, &buffer, 255);
+  if (n < 0) {
+    std::cerr << "Error reading from socket" << std::endl;
+    return 1;
+  }
+
+  std::cout << buffer << std::endl;
+  strcpy(buffer, "+PONG\r\n");
+  n = write(client_fd, buffer, 7);
+  if (n < 0) {
+    std::cerr << "Error writing into socket" << std::endl;
+    return 1;
+  }
   
   close(server_fd);
 
