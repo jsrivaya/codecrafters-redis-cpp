@@ -3,10 +3,22 @@
 #include <string>
 #include <cstring>
 #include <unistd.h>
+#include <sys/epoll.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <sys/fcntl.h>
+
+#define MAX_EVENTS 10
+#define PORT 8080
+
+int make_socket_non_blocking(int socket_fd) {
+    int flags = fcntl(socket_fd, F_GETFL, 0);
+    if (flags == -1) return -1;
+    flags |= O_NONBLOCK;
+    return fcntl(socket_fd, F_SETFL, flags);
+}
 
 int main(int argc, char **argv) {
   // Flush after every std::cout / std::cerr
@@ -18,6 +30,7 @@ int main(int argc, char **argv) {
    std::cerr << "Failed to create server socket\n";
    return 1;
   }
+  make_socket_non_blocking(server_fd);
   
   // Since the tester restarts your program quite often, setting SO_REUSEADDR
   // ensures that we don't run into 'Address already in use' errors
@@ -43,30 +56,42 @@ int main(int argc, char **argv) {
     return 1;
   }
   
-  struct sockaddr_in client_addr;
-  int client_addr_len = sizeof(client_addr);
-  std::cout << "Waiting for a client to connect...\n";
-  
-  auto client_fd = accept(server_fd, (struct sockaddr *) &client_addr, (socklen_t *) &client_addr_len);
-  std::cout << "Client connected\n";
+  int epoll_fd = epoll_create1(0); // Creates an epoll instance 
+  epoll_event event;
+  event.data.fd = server_fd;
+  event.events = EPOLLIN; // Monitor for incoming connections
+  epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event);
 
+  epoll_event events[MAX_EVENTS];
 
-  char buffer[256];
-  bzero(buffer, 256);
-  while(auto n = read(client_fd, &buffer, 255)) {
-    if (n < 0) {
-      std::cerr << "Error reading from socket" << std::endl;
-      close(server_fd);
-      return 1;
-    }
-
-    std::cout << buffer << std::endl;
-    strcpy(buffer, "+PONG\r\n");
-    n = write(client_fd, buffer, 7);
-    if (n < 0) {
-      std::cerr << "Error writing into socket" << std::endl;
-      close(server_fd);
-      return 1;
+  while (true) {
+    /**
+     * @brief timeout of -1 causes epoll_wait() to block indefinitely, while
+       specifying a timeout equal to zero causes epoll_wait() to return
+       immediately, even if no events are available
+     */
+    int n_fds = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
+    for (int i = 0; i < n_fds; ++i) {
+        if (events[i].data.fd == server_fd) {
+            // Accept new connection
+            int client_fd = accept(server_fd, NULL, NULL);
+            make_socket_non_blocking(client_fd);
+            event.data.fd = client_fd;
+            event.events = EPOLLIN | EPOLLET;
+            epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &event);
+        } else {
+            // Handle data from client
+            char buf[1024];
+            ssize_t count = read(events[i].data.fd, buf, sizeof(buf));
+            if (count == 0) { // EOF
+                close(events[i].data.fd);
+            } else if (count > 0) {
+                strcpy(buf, "+PONG\r\n");
+                write(events[i].data.fd, buf, 7); // Echo back
+            } else {
+              std::cerr << "error on read: " << errno << std::endl;
+            }
+        }
     }
   }
 
