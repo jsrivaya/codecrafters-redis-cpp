@@ -1,0 +1,28 @@
+---
+BasedOnStyle: LLVM
+Language: Cpp
+Standard: Latest
+
+AlignEscapedNewlinesLeft: true
+AlignOperands: true
+AlignTrailingComments: true
+ConstructorInitializerAllOnOneLineOrOnePerLine: true
+Cpp11BracedListStyle: true
+IndentWidth: 4
+KeepEmptyLinesAtTheStartOfBlocks: false
+PointerAlignment: Left
+SortIncludes: false
+SpaceAfterCStyleCast: true
+
+# Custom
+ColumnLimit: 120
+IndentCaseLabels: true
+AllowShortFunctionsOnASingleLine: false
+AllowShortLambdasOnASingleLine: false
+AlwaysBreakTemplateDeclarations: true
+AlignEscapedNewlines: DontAlign
+IndentExternBlock: Indent
+NamespaceIndentation: All
+IncludeBlocks: Regroup
+QualifierAlignment: Left
+# vim: ft=yaml
