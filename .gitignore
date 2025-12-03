@@ -1045,3 +1045,7 @@ dkms.conf
 *.dis
 
 vcpkg_installed
+
+# cppcheck
+cppcheck-cache/
+cppcheck_report.txt

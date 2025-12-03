@@ -148,7 +148,7 @@ std::string set(std::deque<std::string>& args) {
     return get_simple_string("OK");
 }
 
-std::string get(std::deque<std::string>& args) {
+std::string get(const std::deque<std::string>& args) {
     return get_bulk_string(db.at(args.front()));
 }
 
@@ -189,7 +189,7 @@ int main(int argc, char** argv) {
     server_addr.sin_addr.s_addr = INADDR_ANY;
     server_addr.sin_port = htons(6379);
 
-    if (bind(server_fd, (struct sockaddr*) &server_addr, sizeof(server_addr)) != 0) {
+    if (bind(server_fd, reinterpret_cast<struct sockaddr*>(&server_addr), sizeof(server_addr)) != 0) {
         std::cerr << "Failed to bind to port 6379\n";
         return 1;
     }
