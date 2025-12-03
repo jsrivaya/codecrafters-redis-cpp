@@ -11,9 +11,12 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <sys/fcntl.h>
+#include <unordered_map>
 
 #define MAX_EVENTS 10
 #define PORT 8080
+
+std::unordered_map<std::string, std::string> db{};
 
 int make_socket_non_blocking(int socket_fd) {
     int flags = fcntl(socket_fd, F_GETFL, 0);
@@ -122,19 +125,41 @@ std::string get_bulk_string(const std::string& s) {
     return "$" + std::to_string(s.length()) + "\r\n" + s + "\r\n";
 }
 
-std::string echo(std::deque<std::string>& command) {
-    command.pop_front(); // remove the "echo"
+std::string get_simple_string(const std::string& s) {
+    return "+" + s + "\r\n";
+}
+
+std::string echo(std::deque<std::string>& args) {
     std::string response{};
-    while(!command.empty()) {
-        response += get_bulk_string(command.front());
-        command.pop_front();
+    while(!args.empty()) {
+        response += get_bulk_string(args.front());
+        args.pop_front();
     }
     return response;
 }
 
+std::string set(std::deque<std::string>& args) {
+    auto var = args.front();
+    args.pop_front();
+    auto value = args.front();
+    args.pop_front();
+
+    db.emplace(var, value);
+    return get_simple_string("OK");
+}
+
+std::string get(std::deque<std::string>& args) {
+    return get_bulk_string(db.at(args.front()));
+}
+
+
 std::string get_response(std::deque<std::string>& resp_array) {
-    if (resp_array.at(0) == "PING") return ping();
-    if (resp_array.at(0) == "ECHO") return echo(resp_array);
+    auto command = resp_array.front();
+    resp_array.pop_front();
+    if (command == "PING") return ping();
+    if (command == "ECHO") return echo(resp_array);
+    if (command == "SET") return set(resp_array);
+    if (command == "GET") return get(resp_array);
 
     throw std::runtime_error("unknown_command");
 }
