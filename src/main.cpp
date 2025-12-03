@@ -1,5 +1,7 @@
 #include <iostream>
 #include <cstdlib>
+#include <cctype>
+#include <deque>
 #include <string>
 #include <cstring>
 #include <unistd.h>
@@ -19,6 +21,122 @@ int make_socket_non_blocking(int socket_fd) {
         return -1;
     flags |= O_NONBLOCK;
     return fcntl(socket_fd, F_SETFL, flags);
+}
+
+int get_array_size(const std::string& resp, int index) {
+    int n = 0;
+    while(std::isdigit(resp[index])) {
+        int digit = resp[index] - '0';
+        n += n * 10 + digit;
+        ++index;
+    }
+    return n;
+}
+
+// receives a resp string and an int index pointing to the first character to skip
+int skip_crlf(const std::string& resp, int index) {
+    if (index < resp.length() && resp[index] == '\r') {
+        ++index;
+        if (index < resp.length() && resp[index] == '\n') {
+            return ++index;
+        }
+    }
+    // TOOD: there is the possibility of this being a parcial read
+
+    throw std::runtime_error("parser_error");    
+}
+
+std::pair<std::string, int> get_element(const std::string& resp, int index) {
+    // 1. read element identifier {+, -, :, *, $}
+    std::string valid = "+-:$*";
+    if (index < resp.length() && valid.find(resp[index]) == std::string::npos)
+        throw std::runtime_error ("parser_error"); // TODO: this could be a partial read
+
+    ++index;
+
+    // 2. read 'n'
+    int n = 0;
+    while (std::isdigit(resp[index])) {
+        int digit = resp[index] - '0';
+        n += n * 10 + digit;
+        ++index;
+    }
+
+    // 3. skip crlf
+    index = skip_crlf(resp, index);
+
+    // 4. read element
+    std::string element{};
+    while (n > 0) {
+        element += resp[index];
+        ++index;
+        --n;
+    }
+
+    // 5. skip crlf
+    index = skip_crlf(resp, index);
+
+    return std::pair<std::string, int> {element, index};
+}
+
+// process incoming message, convert it from string to vector of strings
+// from "*2\r\n$4\r\nECHO\r\n$3\r\nhey\r\n"
+// to ["ECHO", "hey"];
+// RESP strings can include multiple arrays
+// each array represent one command and its arguments
+std::deque<std::string> get_resp_array(const std::string& resp) {
+    // read "*"
+    // read n
+    // read n bytes
+    std::deque<std::string> resp_array{};
+    for (int i = 0; i < resp.length(); ++i) {
+        if (resp[i] == '*') { // 1. new array: contains 'n' elements
+            ++i;
+            int n = 0;
+            while(std::isdigit(resp[i])) {
+                int digit = resp[i] - '0';
+                n += n * 10 + digit;
+                ++i;
+            }
+
+            // 2. skip first crlf
+            i = skip_crlf(resp, i); // "\r\n"
+
+            // 3. consume 'n' elements: command and arguments
+            while(n > 0 && i < resp.length()) {
+                // read element
+                auto element = get_element(resp, i);
+                resp_array.emplace_back(element.first);
+                i = element.second;
+            }
+        }
+    }
+    return resp_array;
+}
+
+std::string ping() {
+    return "+PONG\r\n";
+}
+
+std::string get_bulk_string(const std::string& s) {
+    return "$" + std::to_string(s.length()) + "\r\n" + s + "\r\n";
+}
+
+std::string echo(std::deque<std::string>& command) {
+    command.pop_front(); // remove the "echo"
+    std::string response{};
+    while(!command.empty()) {
+        response += get_bulk_string(command.front());
+        command.pop_front();
+    }
+    return response;
+}
+
+std::string get_response(std::deque<std::string>& resp_array) {
+    if (resp_array.at(0) == "PING") return ping();
+    if (resp_array.at(0) == "ECHO") return echo(resp_array);
+
+    throw std::runtime_error("unknown_command");
 }
 
 int main(int argc, char** argv) {
@@ -87,8 +205,13 @@ int main(int argc, char** argv) {
                 if (count == 0) { // EOF
                     close(events[i].data.fd);
                 } else if (count > 0) {
-                    strcpy(buf, "+PONG\r\n");
-                    write(events[i].data.fd, buf, 7); // Echo back
+                    try {
+                        auto resp_array = get_resp_array(buf);
+                        auto response = get_response(resp_array);
+                        write(events[i].data.fd, response.c_str(), response.size()); // Echo back
+                    } catch (const std::exception& e) {
+                        std::cerr << e.what() << std::endl;
+                    }
                 } else {
                     std::cerr << "error on read: " << errno << std::endl;
                 }
