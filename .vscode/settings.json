@@ -60,7 +60,10 @@
         "optional": "cpp",
         "sstream": "cpp",
         "unordered_map": "cpp",
-        "vector": "cpp"
+        "vector": "cpp",
+        "unordered_set": "cpp",
+        "list": "cpp",
+        "queue": "cpp"
     },
     // Set the number of spaces a tab represents
     "editor.tabSize": 4,

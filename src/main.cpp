@@ -1,22 +1,14 @@
+#include "server.hpp"
+
+#include <arpa/inet.h>
 #include <iostream>
-#include <cstdlib>
-#include <cctype>
-#include <deque>
+#include <netdb.h>
 #include <string>
-#include <cstring>
-#include <unistd.h>
 #include <sys/epoll.h>
 #include <sys/types.h>
 #include <sys/socket.h>
-#include <arpa/inet.h>
-#include <netdb.h>
 #include <sys/fcntl.h>
-#include <unordered_map>
-
-#define MAX_EVENTS 10
-#define PORT 8080
-
-std::unordered_map<std::string, std::string> db{};
+#include <unistd.h>
 
 int make_socket_non_blocking(int socket_fd) {
     int flags = fcntl(socket_fd, F_GETFL, 0);
@@ -26,148 +18,12 @@ int make_socket_non_blocking(int socket_fd) {
     return fcntl(socket_fd, F_SETFL, flags);
 }
 
-int get_array_size(const std::string& resp, int index) {
-    int n = 0;
-    while(std::isdigit(resp[index])) {
-        int digit = resp[index] - '0';
-        n += n * 10 + digit;
-        ++index;
-    }
-    return n;
-}
-
-// receives a resp string and an int index pointing to the first character to skip
-int skip_crlf(const std::string& resp, int index) {
-    if (index < resp.length() && resp[index] == '\r') {
-        ++index;
-        if (index < resp.length() && resp[index] == '\n') {
-            return ++index;
-        }
-    }
-    // TOOD: there is the possibility of this being a parcial read
-
-    throw std::runtime_error("parser_error");    
-}
-
-std::pair<std::string, int> get_element(const std::string& resp, int index) {
-    // 1. read element identifier {+, -, :, *, $}
-    std::string valid = "+-:$*";
-    if (index < resp.length() && valid.find(resp[index]) == std::string::npos)
-        throw std::runtime_error ("parser_error"); // TODO: this could be a partial read
-
-    ++index;
-
-    // 2. read 'n'
-    int n = 0;
-    while (std::isdigit(resp[index])) {
-        int digit = resp[index] - '0';
-        n += n * 10 + digit;
-        ++index;
-    }
-
-    // 3. skip crlf
-    index = skip_crlf(resp, index);
-
-    // 4. read element
-    std::string element{};
-    while (n > 0) {
-        element += resp[index];
-        ++index;
-        --n;
-    }
-
-    // 5. skip crlf
-    index = skip_crlf(resp, index);
-
-    return std::pair<std::string, int> {element, index};
-}
-
-// process incoming message, convert it from string to vector of strings
-// from "*2\r\n$4\r\nECHO\r\n$3\r\nhey\r\n"
-// to ["ECHO", "hey"];
-// RESP strings can include multiple arrays
-// each array represent one command and its arguments
-std::deque<std::string> get_resp_array(const std::string& resp) {
-    // read "*"
-    // read n
-    // read n bytes
-    std::deque<std::string> resp_array{};
-    for (int i = 0; i < resp.length(); ++i) {
-        if (resp[i] == '*') { // 1. new array: contains 'n' elements
-            ++i;
-            int n = 0;
-            while(std::isdigit(resp[i])) {
-                int digit = resp[i] - '0';
-                n += n * 10 + digit;
-                ++i;
-            }
-
-            // 2. skip first crlf
-            i = skip_crlf(resp, i); // "\r\n"
-
-            // 3. consume 'n' elements: command and arguments
-            while(n > 0 && i < resp.length()) {
-                // read element
-                auto element = get_element(resp, i);
-                resp_array.emplace_back(element.first);
-                i = element.second;
-            }
-        }
-    }
-    return resp_array;
-}
-
-std::string ping() {
-    return "+PONG\r\n";
-}
-
-std::string get_bulk_string(const std::string& s) {
-    return "$" + std::to_string(s.length()) + "\r\n" + s + "\r\n";
-}
-
-std::string get_simple_string(const std::string& s) {
-    return "+" + s + "\r\n";
-}
-
-std::string echo(std::deque<std::string>& args) {
-    std::string response{};
-    while(!args.empty()) {
-        response += get_bulk_string(args.front());
-        args.pop_front();
-    }
-    return response;
-}
-
-std::string set(std::deque<std::string>& args) {
-    auto var = args.front();
-    args.pop_front();
-    auto value = args.front();
-    args.pop_front();
-
-    db.emplace(var, value);
-    return get_simple_string("OK");
-}
-
-std::string get(const std::deque<std::string>& args) {
-    return get_bulk_string(db.at(args.front()));
-}
-
-
-std::string get_response(std::deque<std::string>& resp_array) {
-    auto command = resp_array.front();
-    resp_array.pop_front();
-    if (command == "PING") return ping();
-    if (command == "ECHO") return echo(resp_array);
-    if (command == "SET") return set(resp_array);
-    if (command == "GET") return get(resp_array);
-
-    throw std::runtime_error("unknown_command");
-}
-
 int main(int argc, char** argv) {
     // Flush after every std::cout / std::cerr
     std::cout << std::unitbuf;
     std::cerr << std::unitbuf;
+
+    redis::Logger::getInstance().set_level(redis::Logger::INFO);
 
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
@@ -225,14 +81,14 @@ int main(int argc, char** argv) {
                 epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &event);
             } else {
                 // Handle data from client
-                char buf[1024];
+                char buf[2048];
                 ssize_t count = read(events[i].data.fd, buf, sizeof(buf));
                 if (count == 0) { // EOF
                     close(events[i].data.fd);
                 } else if (count > 0) {
                     try {
-                        auto resp_array = get_resp_array(buf);
-                        auto response = get_response(resp_array);
+                        auto resp_array = redis::get_resp_array(buf);
+                        auto response = redis::get_response(resp_array);
                         write(events[i].data.fd, response.c_str(), response.size()); // Echo back
                     } catch (const std::exception& e) {
                         std::cerr << e.what() << std::endl;
