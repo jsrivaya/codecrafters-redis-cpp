@@ -63,7 +63,8 @@
         "vector": "cpp",
         "unordered_set": "cpp",
         "list": "cpp",
-        "queue": "cpp"
+        "queue": "cpp",
+        "charconv": "cpp"
     },
     // Set the number of spaces a tab represents
     "editor.tabSize": 4,

@@ -24,28 +24,39 @@ struct Data {
 std::list<Data> store{};
 std::unordered_map<std::string, std::list<Data>::iterator> lookup_table{};
 
-int get_array_size(const std::string& resp, int index) {
-    int n = 0;
-    while(std::isdigit(resp[index])) {
-        int digit = resp[index] - '0';
-        n += n * 10 + digit;
-        ++index;
-    }
-    return n;
-}
-
 // receives a resp string and an int index pointing to the first character to skip
-int skip_crlf(const std::string& resp, int index) {
+void skip_crlf(const std::string& resp, int& index) {
     Logger::getInstance().debug(__func__, "resp: " + resp + "; index: " + std::to_string(index));
     if (index < resp.length() && resp[index] == '\r') {
+        Logger::getInstance().debug(__func__, "resp[index]: " + resp[index]);
         ++index;
         if (index < resp.length() && resp[index] == '\n') {
-            return ++index;
+            ++index;
+            return;
         }
     }
     // TOOD: there is the possibility of this being a parcial read
 
-    throw std::runtime_error("parser_error");    
+    throw std::runtime_error("parser_error: index=" + std::to_string(index));
+}
+
+int get_array_size(const std::string& resp, int& index) {
+    Logger::getInstance().debug(__func__, "resp: " + resp + "; index: " + std::to_string(index));
+    int n = 0;
+    if(index < resp.length() && resp[index] == '*') {
+        ++index;
+
+        while(index < resp.length() && std::isdigit(resp[index])) {
+            int digit = resp[index] - '0';
+            n += n * 10 + digit;
+            ++index;
+        }
+        skip_crlf(resp, index);
+
+        return n;
+    }
+
+    return -1;
 }
 
 std::pair<std::string, int> get_element(const std::string& resp, int index) {
@@ -66,7 +77,7 @@ std::pair<std::string, int> get_element(const std::string& resp, int index) {
     }
 
     // 3. skip crlf
-    index = skip_crlf(resp, index);
+    skip_crlf(resp, index);
 
     // 4. read element: read 'n' bytes
     std::string element{};
@@ -77,7 +88,7 @@ std::pair<std::string, int> get_element(const std::string& resp, int index) {
     }
 
     // 5. skip crlf
-    index = skip_crlf(resp, index);
+    skip_crlf(resp, index);
 
     return std::pair<std::string, int> {element, index};
 }
@@ -87,32 +98,23 @@ std::pair<std::string, int> get_element(const std::string& resp, int index) {
 // to ["ECHO", "hey"];
 // RESP strings can include multiple arrays
 // each array represent one command and its arguments
+// in the future this should read resp arrays (commands)
 std::queue<std::string> get_resp_array(const std::string& resp) {
     // read "*"
     // read n
     // read n bytes
     std::queue<std::string> resp_array{};
     for (int i = 0; i < resp.length(); ++i) {
-        if (resp[i] == '*') { // 1. new array: contains 'n' elements
-            ++i;
-            int n = 0;
-            while(std::isdigit(resp[i])) {
-                int digit = resp[i] - '0';
-                n += n * 10 + digit;
-                ++i;
-            }
+        // 1. read array size
+        auto n = get_array_size(resp, i);
 
-            // 2. skip first crlf
-            i = skip_crlf(resp, i); // "\r\n"
-
-            // 3. consume 'n' elements: command and arguments
-            while(n > 0 && i < resp.length()) {
-                // read element
-                auto element = get_element(resp, i);
-                resp_array.emplace(element.first);
-                i = element.second;
-                --n;
-            }
+        // 2. consume 'n' array elements: command and arguments
+        while(n > 0 && i < resp.length()) {
+            // read element
+            auto element = get_element(resp, i);
+            resp_array.emplace(element.first);
+            i = element.second;
+            --n;
         }
     }
     return resp_array;
