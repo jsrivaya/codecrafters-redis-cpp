@@ -89,7 +89,7 @@ int main(int argc, char** argv) {
                     try {
                         auto resp_array = redis::get_resp_array(buf);
                         auto response = redis::get_response(resp_array);
-                        write(events[i].data.fd, response.c_str(), response.size()); // Echo back
+                        write(events[i].data.fd, response.c_str(), response.size()); // Respond
                     } catch (const std::exception& e) {
                         std::cerr << e.what() << std::endl;
                     }
