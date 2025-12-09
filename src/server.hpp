@@ -7,10 +7,36 @@
 #include <sys/epoll.h>
 #include <sys/fcntl.h>
 #include <sys/socket.h>
+#include <variant>
+#include <vector>
 
 namespace redis {
 #define MAX_EVENTS 10
 #define PORT 8080
+
+    enum DataType {
+        STRING,     // Basic type for text or binary data.
+        HASH,       // Field-value pairs, useful for representing objects.
+        LIST,       // Ordered collection of strings, implemented as a linked list.
+        SET,        // Unordered collection of unique strings.
+        ZSET,       // Set ordered by a floating-point score.
+        STREAM,     // Append-only log for event streaming.
+        BITMAP,     // Bit-level operations on strings.
+        BITFIELD,   // Efficient encoding of multiple integer fields.
+        GEOSPATIAL, // Indexes for geographic data.
+        JSON,       // Native support for JSON documents.
+        VSET,       // Vector Set: For similarity search with high-dimensional vectors.
+        PROB,       // Probabilistic types: Including HyperLogLog, Bloom filters, and more.,
+    };
+
+    using RedisValue = std::variant<std::string, std::vector<std::string>>;
+
+    struct DataPoint {
+        RedisValue value;
+        std::chrono::steady_clock::time_point timestamp;
+        // std::optional<unsigned> expiry_ms;
+        unsigned expiry_ms;
+    };
 
     class RedisServer {
       public:
@@ -50,8 +76,8 @@ namespace redis {
                             close(events[i].data.fd);
                         } else if (count > 0) {
                             try {
-                                auto resp_array = get_resp_array(buf);
-                                auto response = get_response(resp_array);
+                                cmd_pipeline = get_resp_array(std::string(buf, count));
+                                auto response = get_response(cmd_pipeline);
                                 write(events[i].data.fd, response.c_str(), response.size()); // Respond
                             } catch (const std::exception& e) {
                                 std::cerr << e.what() << std::endl;
@@ -67,11 +93,11 @@ namespace redis {
       protected:
         int server_fd;
         struct sockaddr_in server_addr;
-        struct sockaddr_in client_addr;
+        std::queue<std::string> cmd_pipeline{};
 
       private:
-        std::list<Data> store{};
-        std::unordered_map<std::string, std::list<Data>::iterator> lookup_table{};
+        std::list<DataPoint> store{};
+        std::unordered_map<std::string, std::list<DataPoint>::iterator> lookup_table{};
 
         RedisServer() {
             server_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -110,27 +136,8 @@ namespace redis {
             close(server_fd);
         }
 
-        int make_socket_non_blocking(int socket_fd) {
-            int flags = fcntl(socket_fd, F_GETFL, 0);
-            if (flags == -1)
-                return -1;
-            flags |= O_NONBLOCK;
-            return fcntl(socket_fd, F_SETFL, flags);
-        }
-
         std::string ping() {
             return "+PONG\r\n";
-        }
-
-        std::string get_nil_bulk_string() {
-            return "$-1\r\n";
-        }
-        std::string get_bulk_string(const std::string& s) {
-            return "$" + std::to_string(s.length()) + "\r\n" + s + "\r\n";
-        }
-
-        std::string get_simple_string(const std::string& s) {
-            return "+" + s + "\r\n";
         }
 
         std::string echo(std::queue<std::string>& args) {
@@ -142,21 +149,45 @@ namespace redis {
             return response;
         }
 
+        std::string get(const std::queue<std::string>& args) {
+            auto lookup_itr = lookup_table.find(args.front());
+            if (lookup_itr != lookup_table.end()) {
+                auto data_entry = lookup_table.at(args.front());
+                auto now = std::chrono::steady_clock::now();
+                auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+                auto entry_expire_time = data_entry->timestamp + std::chrono::milliseconds(data_entry->expiry_ms);
+                auto entry_expire_time_ms =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(entry_expire_time.time_since_epoch()).count();
+
+                if (data_entry->expiry_ms > 0 && now >= entry_expire_time)
+                    return get_nil_bulk_string();
+
+                return get_bulk_string(std::get<std::string>(data_entry->value));
+            } else {
+                std::cerr << "Key doesnt exists: " << args.front() << std::endl;
+            }
+            return get_nil_bulk_string();
+        }
+
         std::string set(std::queue<std::string>& args) {
             auto key = args.front();
             args.pop();
             auto value = args.front();
             args.pop();
 
-            Data data{value, std::chrono::steady_clock::now(), 0};
             auto lookup_itr = lookup_table.find(key);
             if (lookup_itr == lookup_table.end()) {
                 // new data: insert in store and lookup table
+                DataPoint data{value, std::chrono::steady_clock::now(), 0};
                 store.emplace_front(data);
                 lookup_table.emplace(key, store.begin());
             } else {
                 // move list element to the front
                 auto data_itr = lookup_table.at(key);
+                if (!std::holds_alternative<std::string>(data_itr->value)) {
+                    return get_simple_string("-WRONGTYPE Operation against a key holding the wrong kind of value");
+                }
+
                 data_itr->value = value;
                 store.splice(store.begin(), store, data_itr);
             }
@@ -173,42 +204,71 @@ namespace redis {
                 }
             }
 
-            return get_simple_string("OK");
+            return get_simple_string("+OK");
         }
 
-        std::string get(const std::queue<std::string>& args) {
-            auto lookup_itr = lookup_table.find(args.front());
-            if (lookup_itr != lookup_table.end()) {
-                auto data_entry = lookup_table.at(args.front());
-                auto now = std::chrono::steady_clock::now();
-                auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-                auto entry_expire_time = data_entry->timestamp + std::chrono::milliseconds(data_entry->expiry_ms);
-                auto entry_expire_time_ms =
-                    std::chrono::duration_cast<std::chrono::milliseconds>(entry_expire_time.time_since_epoch()).count();
+        std::string rpush(std::queue<std::string>& args) {
+            auto key = args.front();
+            args.pop();
+            auto value = args.front();
+            args.pop();
 
-                if (data_entry->expiry_ms > 0 && now >= entry_expire_time)
-                    return get_nil_bulk_string();
-
-                return get_bulk_string(data_entry->value);
-            } else {
-                std::cerr << "Key doesnt exists: " << args.front() << std::endl;
+            auto lookup_itr = lookup_table.find(key);
+            if (lookup_itr == lookup_table.end()) {
+                // new data: insert in store and lookup table
+                DataPoint data{std::vector<std::string>{value}, std::chrono::steady_clock::now(), 0};
+                store.emplace_front(data);
+                lookup_table.emplace(key, store.begin());
+                return get_resp_int("1");
             }
-            return get_nil_bulk_string();
+
+            // move list element to the front
+            auto data_itr = lookup_table.at(key);
+            auto list = std::get_if<std::vector<std::string>>(&data_itr->value);
+            if (list == nullptr) {
+                return get_simple_string("-WRONGTYPE Operation against a key holding the wrong kind of value");
+            }
+            list->emplace_back(value);
+            store.splice(store.begin(), store, data_itr);
+
+            return get_resp_int(std::to_string(list->size()));
         }
 
         std::string get_response(std::queue<std::string>& resp_array) {
             auto command = resp_array.front();
             resp_array.pop();
-            if (command == "PING")
-                return ping();
             if (command == "ECHO")
                 return echo(resp_array);
-            if (command == "SET")
-                return set(resp_array);
+            if (command == "PING")
+                return ping();
             if (command == "GET")
                 return get(resp_array);
+            if (command == "SET")
+                return set(resp_array);
+            if (command == "RPUSH")
+                return rpush(resp_array);
 
             throw std::runtime_error("unknown_command");
+        }
+
+        std::string get_nil_bulk_string() {
+            return "$-1\r\n";
+        }
+        std::string get_bulk_string(const std::string& s) {
+            return "$" + std::to_string(s.length()) + "\r\n" + s + "\r\n";
+        }
+        std::string get_simple_string(const std::string& s) {
+            return s + "\r\n";
+        }
+        std::string get_resp_int(const std::string& s) {
+            return ":" + s + "\r\n";
+        }
+        int make_socket_non_blocking(int socket_fd) {
+            int flags = fcntl(socket_fd, F_GETFL, 0);
+            if (flags == -1)
+                return -1;
+            flags |= O_NONBLOCK;
+            return fcntl(socket_fd, F_SETFL, flags);
         }
     };
 

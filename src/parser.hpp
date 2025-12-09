@@ -11,17 +11,11 @@
 #include <unordered_map>
 
 namespace redis {
-    struct Data {
-        std::string value;
-        std::chrono::steady_clock::time_point timestamp;
-        unsigned expiry_ms;
-    };
-
     // receives a resp string and an int index pointing to the first character to skip
     void skip_crlf(const std::string& resp, int& index) {
-        Logger::getInstance().debug(__func__, "resp: " + resp + "; index: " + std::to_string(index));
+        Logger::getInstance().debug(__func__, "resp[index]: '" + std::to_string(resp[index]) + "'");
         if (index < resp.length() && resp[index] == '\r') {
-            Logger::getInstance().debug(__func__, "resp[index]: " + resp[index]);
+            Logger::getInstance().debug(__func__, "resp[index]: '" + std::to_string(resp[index]) + "'");
             ++index;
             if (index < resp.length() && resp[index] == '\n') {
                 ++index;
@@ -30,7 +24,8 @@ namespace redis {
         }
         // TOOD: there is the possibility of this being a parcial read
 
-        throw std::runtime_error("parser_error: index=" + std::to_string(index));
+        throw std::runtime_error("parser_error: index=" + std::to_string(index) +
+                                 "; resp.length()=" + std::to_string(resp.length()));
     }
 
     int get_array_size(const std::string& resp, int& index) {
