@@ -13,9 +13,7 @@
 namespace redis {
     // receives a resp string and an int index pointing to the first character to skip
     void skip_crlf(const std::string& resp, int& index) {
-        Logger::getInstance().debug(__func__, "resp[index]: '" + std::to_string(resp[index]) + "'");
         if (index < resp.length() && resp[index] == '\r') {
-            Logger::getInstance().debug(__func__, "resp[index]: '" + std::to_string(resp[index]) + "'");
             ++index;
             if (index < resp.length() && resp[index] == '\n') {
                 ++index;
@@ -24,8 +22,7 @@ namespace redis {
         }
         // TOOD: there is the possibility of this being a parcial read
 
-        throw std::runtime_error("parser_error: index=" + std::to_string(index) +
-                                 "; resp.length()=" + std::to_string(resp.length()));
+        throw std::runtime_error("parser_error");
     }
 
     int get_array_size(const std::string& resp, int& index) {
@@ -47,7 +44,7 @@ namespace redis {
         return -1;
     }
 
-    std::pair<std::string, int> get_element(const std::string& resp, int index) {
+    std::string get_element(const std::string& resp, int& index) {
         Logger::getInstance().debug(__func__, "resp: " + resp + "; index: " + std::to_string(index));
         // 1. read element identifier {+, -, :, *, $}
         std::string valid = "+-:$*";
@@ -60,7 +57,7 @@ namespace redis {
         int n = 0;
         while (std::isdigit(resp[index])) {
             int digit = resp[index] - '0';
-            n += n * 10 + digit;
+            n = n * 10 + digit;
             ++index;
         }
 
@@ -78,7 +75,7 @@ namespace redis {
         // 5. skip crlf
         skip_crlf(resp, index);
 
-        return std::pair<std::string, int>{element, index};
+        return element;
     }
 
     // process incoming message, convert it from string to vector of strings
@@ -92,7 +89,9 @@ namespace redis {
         // read n
         // read n bytes
         std::queue<std::string> resp_array{};
-        for (int i = 0; i < resp.length(); ++i) {
+
+        int i = 0;
+        while (i < resp.length()) {
             // 1. read array size
             auto n = get_array_size(resp, i);
 
@@ -100,8 +99,7 @@ namespace redis {
             while (n > 0 && i < resp.length()) {
                 // read element
                 auto element = get_element(resp, i);
-                resp_array.emplace(element.first);
-                i = element.second;
+                resp_array.emplace(element);
                 --n;
             }
         }
