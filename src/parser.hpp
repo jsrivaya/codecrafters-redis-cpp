@@ -20,7 +20,7 @@ namespace redis {
                 return;
             }
         }
-        // TOOD: there is the possibility of this being a parcial read
+        // TOOD: there is the possibility of this being a partial read
 
         throw std::runtime_error("parser_error");
     }
@@ -33,7 +33,7 @@ namespace redis {
             int n = 0;
             while (index < resp.length() && std::isdigit(resp[index])) {
                 int digit = resp[index] - '0';
-                n += n * 10 + digit;
+                n = n * 10 + digit;
                 ++index;
             }
             skip_crlf(resp, index);
@@ -55,7 +55,7 @@ namespace redis {
 
         // 2. read 'n'
         int n = 0;
-        while (std::isdigit(resp[index])) {
+        while (index < resp.length() && std::isdigit(resp[index])) {
             int digit = resp[index] - '0';
             n = n * 10 + digit;
             ++index;

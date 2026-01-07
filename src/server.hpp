@@ -12,7 +12,6 @@
 
 namespace redis {
 #define MAX_EVENTS 10
-#define PORT 8080
 
     enum DataType {
         STRING,     // Basic type for text or binary data.
@@ -64,6 +63,9 @@ namespace redis {
                     if (events[i].data.fd == server_fd) {
                         // Accept new connection
                         int client_fd = accept(server_fd, NULL, NULL);
+                        if (client_fd < 0) {
+                            throw std::runtime_error("redis server: failed to accept connection");
+                        }
                         make_socket_non_blocking(client_fd);
                         event.data.fd = client_fd;
                         event.events = EPOLLIN | EPOLLET;
@@ -119,7 +121,7 @@ namespace redis {
             server_addr.sin_addr.s_addr = INADDR_ANY;
             server_addr.sin_port = htons(6379);
             if (bind(server_fd, reinterpret_cast<struct sockaddr*>(&server_addr), sizeof(server_addr)) != 0) {
-                std::cerr << "Failed to bind to port 6379\n";
+                std::cerr << "Failed to bind to 6379 \n";
                 throw std::runtime_error("redis server: bind failed");
             }
 
