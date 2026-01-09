@@ -92,12 +92,10 @@ namespace redis {
             }
         }
 
-      protected:
+      private:
         int server_fd;
         struct sockaddr_in server_addr;
         std::queue<std::string> cmd_pipeline{};
-
-      private:
         std::list<DataPoint> store{};
         std::unordered_map<std::string, std::list<DataPoint>::iterator> lookup_table{};
 
