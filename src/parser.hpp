@@ -105,4 +105,46 @@ namespace redis {
         }
         return resp_array;
     }
+
+    // complete message:
+    // "*2\r\n$4\r\nECHO\r\n$3\r\nhey\r\n"
+    bool has_complete_message(const std::string& buffer) {
+        if (buffer.empty() || buffer[0] != '*')
+            return false;
+
+        size_t pos = 1;
+
+        int array_size = 0;
+        while (pos < buffer.size() && std::isdigit(buffer[pos])) {
+            array_size = array_size * 10 + (buffer[pos] - '0');
+            ++pos;
+        }
+        if (pos + 2 > buffer.size() || buffer.substr(pos, 2) != "\r\n")
+            return false;
+
+        pos += 2;
+        // ensure all message parameters are present in the buffer
+        for (size_t i = 0; i < array_size; ++i) {
+            if (pos >= buffer.size() || buffer[pos] != '$')
+                return false;
+            ++pos;
+
+            auto param_size = 0;
+            while (pos < buffer.size() && std::isdigit(buffer[pos])) {
+                param_size = param_size * 10 + (buffer[pos] - '0');
+                ++pos;
+            }
+            if (pos + 2 > buffer.size() || buffer.substr(pos, 2) != "\r\n")
+                return false;
+
+            pos += 2;
+
+            if (pos + param_size + 2 > buffer.size())
+                return false;
+
+            pos += param_size + 2;
+        }
+
+        return true;
+    }
 } // namespace redis

@@ -60,9 +60,9 @@ namespace redis {
                  **/
                 int n_fds = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
                 for (int i = 0; i < n_fds; ++i) {
-                    if (events[i].data.fd == server_fd) {
-                        // Accept new connection
-                        int client_fd = accept(server_fd, NULL, NULL);
+                    auto event_fd = events[i].data.fd;
+                    if (event_fd == server_fd) { // Accept new client connection
+                        auto client_fd = accept(server_fd, NULL, NULL);
                         if (client_fd < 0) {
                             throw std::runtime_error("redis server: failed to accept connection");
                         }
@@ -70,17 +70,23 @@ namespace redis {
                         event.data.fd = client_fd;
                         event.events = EPOLLIN | EPOLLET;
                         epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &event);
-                    } else {
-                        // Handle data from client
+                        clients[client_fd] = ClientConnection{client_fd, ""};
+                    } else { // Handle data from client
                         char buf[2048];
-                        ssize_t count = read(events[i].data.fd, buf, sizeof(buf));
-                        if (count == 0) { // EOF
-                            close(events[i].data.fd);
+                        ssize_t count = read(event_fd, buf, sizeof(buf));
+                        if (count == 0) { // EOF - client disconnected
+                            close(event_fd);
+                            clients.erase(event_fd);
                         } else if (count > 0) {
-                            try {
-                                cmd_pipeline = get_resp_array(std::string(buf, count));
-                                auto response = get_response(cmd_pipeline);
-                                write(events[i].data.fd, response.c_str(), response.size()); // Respond
+                            clients[event_fd].buffer += std::string(buf, count);
+                            try { // Try to parse from buffer
+                                if (has_complete_message(clients[event_fd].buffer)) {
+                                    cmd_pipeline = get_resp_array(clients[event_fd].buffer);
+                                    // ... process ...
+                                    auto response = get_response(cmd_pipeline);
+                                    write(event_fd, response.c_str(), response.size()); // Respond
+                                    clients[event_fd].buffer.clear();                   // clear buffer
+                                }
                             } catch (const std::exception& e) {
                                 std::cerr << e.what() << std::endl;
                             }
@@ -93,11 +99,16 @@ namespace redis {
         }
 
       private:
+        struct ClientConnection {
+            int client_fd;
+            std::string buffer;
+        };
         int server_fd;
         struct sockaddr_in server_addr;
         std::queue<std::string> cmd_pipeline{};
         std::list<DataPoint> store{};
         std::unordered_map<std::string, std::list<DataPoint>::iterator> lookup_table{};
+        std::unordered_map<int, ClientConnection> clients;
 
         RedisServer() {
             server_fd = socket(AF_INET, SOCK_STREAM, 0);
