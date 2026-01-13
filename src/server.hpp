@@ -215,25 +215,31 @@ namespace redis {
         }
 
         std::string rpush(std::queue<std::string>& args) {
+            if(args.size() < 2) return get_nil_bulk_string();
+
             auto key = args.front();
             args.pop();
-            auto value = args.front();
-            args.pop();
-            unsigned expiry_ms = 0; // default value
 
-            auto data_ref = cache.get(key);
-            if(data_ref) {
-                auto list = std::get_if<std::vector<std::string>>(&data_ref->get().value);
-                if (list == nullptr) {
-                    return get_simple_string("-WRONGTYPE Operation against a key holding the wrong kind of value");
+            while (!args.empty()) {
+                auto value = args.front();
+                args.pop();
+                unsigned expiry_ms = 0; // default value
+
+                auto data_ref = cache.get(key);
+                if(data_ref) {
+                    auto list = std::get_if<std::vector<std::string>>(&data_ref->get().value);
+                    if (list == nullptr) {
+                        return get_simple_string("-WRONGTYPE Operation against a key holding the wrong kind of value");
+                    }
+                    list->emplace_back(value);
+                } else {
+                    DataPoint data{std::vector<std::string>{value}, std::chrono::steady_clock::now(), expiry_ms};
+                    cache.put(key, data);
                 }
-                list->emplace_back(value);
-                return get_resp_int(std::to_string(list->size()));
-            } else {
-                DataPoint data{std::vector<std::string>{value}, std::chrono::steady_clock::now(), expiry_ms};
-                cache.put(key, data);
-                return get_resp_int("1");
             }
+
+            auto list = std::get_if<std::vector<std::string>>(&cache.get(key)->get().value);
+            return get_resp_int(std::to_string(list->size()));
         }
 
         std::string get_response(std::queue<std::string>& resp_array) {
