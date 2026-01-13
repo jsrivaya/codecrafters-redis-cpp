@@ -114,7 +114,7 @@ namespace redis {
 
         size_t pos = 1;
 
-        int array_size = 0;
+        size_t array_size = 0;
         while (pos < buffer.size() && std::isdigit(buffer[pos])) {
             array_size = array_size * 10 + (buffer[pos] - '0');
             ++pos;

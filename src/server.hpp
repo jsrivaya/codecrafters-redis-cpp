@@ -2,6 +2,7 @@
 
 #include "logger.hpp"
 #include "parser.hpp"
+#include "lru.hpp"
 
 #include <arpa/inet.h>
 #include <sys/epoll.h>
@@ -33,7 +34,6 @@ namespace redis {
     struct DataPoint {
         RedisValue value;
         std::chrono::steady_clock::time_point timestamp;
-        // std::optional<unsigned> expiry_ms;
         unsigned expiry_ms;
     };
 
@@ -85,7 +85,8 @@ namespace redis {
                                     // ... process ...
                                     auto response = get_response(cmd_pipeline);
                                     write(event_fd, response.c_str(), response.size()); // Respond
-                                    clients[event_fd].buffer.clear();                   // clear buffer
+                                    // We do not bulk messages yet: clear buffer
+                                    clients[event_fd].buffer.clear();
                                 }
                             } catch (const std::exception& e) {
                                 std::cerr << e.what() << std::endl;
@@ -106,8 +107,7 @@ namespace redis {
         int server_fd;
         struct sockaddr_in server_addr;
         std::queue<std::string> cmd_pipeline{};
-        std::list<DataPoint> store{};
-        std::unordered_map<std::string, std::list<DataPoint>::iterator> lookup_table{};
+        looneytools::LRUCache<std::string, DataPoint> cache{10};
         std::unordered_map<int, ClientConnection> clients;
 
         RedisServer() {
@@ -161,22 +161,24 @@ namespace redis {
         }
 
         std::string get(const std::queue<std::string>& args) {
-            auto lookup_itr = lookup_table.find(args.front());
-            if (lookup_itr != lookup_table.end()) {
-                auto data_entry = lookup_table.at(args.front());
+            auto key = args.front();
+
+            if (cache.exists(key)) {
+                auto data_ref = cache.get(key);
                 auto now = std::chrono::steady_clock::now();
                 auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-                auto entry_expire_time = data_entry->timestamp + std::chrono::milliseconds(data_entry->expiry_ms);
+                auto entry_expire_time = data_ref->get().timestamp + std::chrono::milliseconds(data_ref->get().expiry_ms);
                 auto entry_expire_time_ms =
-                    std::chrono::duration_cast<std::chrono::milliseconds>(entry_expire_time.time_since_epoch()).count();
-
-                if (data_entry->expiry_ms > 0 && now >= entry_expire_time)
+                    std::chrono::duration_cast<std::chrono::milliseconds>(entry_expire_time.time_since_epoch()).count();                
+                if (data_ref->get().expiry_ms > 0 && now >= entry_expire_time)
                     return get_nil_bulk_string();
 
-                return get_bulk_string(std::get<std::string>(data_entry->value));
-            } else {
-                std::cerr << "Key doesnt exists: " << args.front() << std::endl;
+                if (!std::holds_alternative<std::string>(data_ref->get().value)) {
+                    return get_simple_string("-WRONGTYPE Operation against a key holding the wrong kind of value");
+                }
+                return get_bulk_string(std::get<std::string>(data_ref->get().value));
             }
+
             return get_nil_bulk_string();
         }
 
@@ -186,23 +188,14 @@ namespace redis {
             auto value = args.front();
             args.pop();
 
-            auto lookup_itr = lookup_table.find(key);
-            if (lookup_itr == lookup_table.end()) {
-                // new data: insert in store and lookup table
-                DataPoint data{value, std::chrono::steady_clock::now(), 0};
-                store.emplace_front(data);
-                lookup_table.emplace(key, store.begin());
-            } else {
-                // move list element to the front
-                auto data_itr = lookup_table.at(key);
-                if (!std::holds_alternative<std::string>(data_itr->value)) {
-                    return get_simple_string("-WRONGTYPE Operation against a key holding the wrong kind of value");
-                }
+            unsigned expiry_ms = 0; // default value
 
-                data_itr->value = value;
-                store.splice(store.begin(), store, data_itr);
+            auto data_ref = cache.get(key);
+            if (data_ref && !std::holds_alternative<std::string>(data_ref->get().value)) {
+                return get_simple_string("-WRONGTYPE Operation against a key holding the wrong kind of value");
             }
-            // parse options
+
+            // parse options: essentially expiry time
             while (!args.empty()) {
                 auto arg = args.front();
                 args.pop();
@@ -211,9 +204,12 @@ namespace redis {
                     args.pop();
                     int px_ms_int = 0;
                     std::from_chars(px_ms.data(), px_ms.data() + px_ms.size(), px_ms_int);
-                    store.begin()->expiry_ms = px_ms_int;
+                    expiry_ms = px_ms_int;
                 }
             }
+
+            DataPoint data{value, std::chrono::steady_clock::now(), expiry_ms};
+            cache.put(key, data);
 
             return get_simple_string("+OK");
         }
@@ -223,26 +219,21 @@ namespace redis {
             args.pop();
             auto value = args.front();
             args.pop();
+            unsigned expiry_ms = 0; // default value
 
-            auto lookup_itr = lookup_table.find(key);
-            if (lookup_itr == lookup_table.end()) {
-                // new data: insert in store and lookup table
-                DataPoint data{std::vector<std::string>{value}, std::chrono::steady_clock::now(), 0};
-                store.emplace_front(data);
-                lookup_table.emplace(key, store.begin());
+            auto data_ref = cache.get(key);
+            if(data_ref) {
+                auto list = std::get_if<std::vector<std::string>>(&data_ref->get().value);
+                if (list == nullptr) {
+                    return get_simple_string("-WRONGTYPE Operation against a key holding the wrong kind of value");
+                }
+                list->emplace_back(value);
+                return get_resp_int(std::to_string(list->size()));
+            } else {
+                DataPoint data{std::vector<std::string>{value}, std::chrono::steady_clock::now(), expiry_ms};
+                cache.put(key, data);
                 return get_resp_int("1");
             }
-
-            // move list element to the front
-            auto data_itr = lookup_table.at(key);
-            auto list = std::get_if<std::vector<std::string>>(&data_itr->value);
-            if (list == nullptr) {
-                return get_simple_string("-WRONGTYPE Operation against a key holding the wrong kind of value");
-            }
-            list->emplace_back(value);
-            store.splice(store.begin(), store, data_itr);
-
-            return get_resp_int(std::to_string(list->size()));
         }
 
         std::string get_response(std::queue<std::string>& resp_array) {
