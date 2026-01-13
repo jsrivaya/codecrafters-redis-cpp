@@ -3,6 +3,7 @@
 #include "logger.hpp"
 #include "parser.hpp"
 #include "lru.hpp"
+#include "utils.hpp"
 
 #include <arpa/inet.h>
 #include <sys/epoll.h>
@@ -182,6 +183,7 @@ namespace redis {
             return get_nil_bulk_string();
         }
 
+        // SET key value
         std::string set(std::queue<std::string>& args) {
             auto key = args.front();
             args.pop();
@@ -214,8 +216,10 @@ namespace redis {
             return get_simple_string("+OK");
         }
 
+        // RPUSH key value_1 ... value_n
         std::string rpush(std::queue<std::string>& args) {
-            if(args.size() < 2) return get_nil_bulk_string();
+            if(args.size() < 2)
+                return get_simple_string("-ERR wrong number of arguments for 'rpush' command");
 
             auto key = args.front();
             args.pop();
@@ -242,6 +246,42 @@ namespace redis {
             return get_resp_int(std::to_string(list->size()));
         }
 
+        // LRANGE key start stop
+        std::string lrange(std::queue<std::string>& args) {
+            if(args.size() != 3)
+                return get_simple_string("-ERR wrong number of arguments for 'lrange' command");
+
+            auto key = args.front();
+            args.pop();
+
+            auto data_ref = cache.get(key);
+            if(!data_ref) return get_empty_resp_array();
+
+            auto start = args.front();
+            args.pop();
+            auto end = args.front();
+            args.pop();
+            if (!is_integer(start) || !is_integer(end))
+                return get_simple_string("-ERR value is not an integer or out of range");
+            
+            auto start_i = std::stoi(start);
+            auto end_i = std::stoi(end);
+
+            auto list = std::get_if<std::vector<std::string>>(&data_ref->get().value);
+            if (list == nullptr) {
+                return get_simple_string("-WRONGTYPE Operation against a key holding the wrong kind of value");
+            }
+            // list[0,1,2,3]: size() = 4
+            // lrange list 2 4: "*2\r\n1\r\n2\r\n$1\r\n3\r\n"
+            end_i = end_i >= list->size() ? list->size() - 1: end_i;
+            auto result = "*" + std::to_string(end_i - start_i + 1) + "\r\n";
+            for (auto i = start_i; i<=end_i; ++i) {
+                result += "$" + std::to_string(list->at(i).size()) + "\r\n";
+                result += list->at(i) + "\r\n";
+            }
+            return result;
+        }
+
         std::string get_response(std::queue<std::string>& resp_array) {
             auto command = resp_array.front();
             resp_array.pop();
@@ -251,6 +291,8 @@ namespace redis {
                 return ping();
             if (command == "GET")
                 return get(resp_array);
+            if (command == "LRANGE")
+                return lrange(resp_array);
             if (command == "SET")
                 return set(resp_array);
             if (command == "RPUSH")
@@ -270,6 +312,9 @@ namespace redis {
         }
         std::string get_resp_int(const std::string& s) {
             return ":" + s + "\r\n";
+        }
+        std::string get_empty_resp_array() {
+            return "*0\r\n";
         }
         int make_socket_non_blocking(int socket_fd) {
             int flags = fcntl(socket_fd, F_GETFL, 0);

@@ -16,9 +16,11 @@ public:
             return std::nullopt;
 
         setMRU(key);
-        return std::ref(map[key]->second);
+        return map[key]->second;
     }
-
+    std::optional<std::reference_wrapper<V>> get_ref(const K& key) {
+        return std::ref(get(key));
+    }
     void put(const K& key, const V& value) {
         if(map.find(key) != map.end()) {
            map[key]->second = value;
