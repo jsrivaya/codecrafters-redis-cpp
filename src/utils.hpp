@@ -1,6 +1,6 @@
 #pragma once
 
-#include<string>
+#include <string>
 
 bool is_integer(const std::string& s) {
     if (s.empty()) return false;
@@ -10,4 +10,4 @@ bool is_integer(const std::string& s) {
         start = 1;
     }
     return std::all_of(s.begin() + start, s.end(), ::isdigit);
-}   
+}

@@ -6,6 +6,7 @@
 #include "utils.hpp"
 
 #include <arpa/inet.h>
+#include <functional>
 #include <sys/epoll.h>
 #include <sys/fcntl.h>
 #include <sys/socket.h>
@@ -216,8 +217,9 @@ namespace redis {
             return get_simple_string("+OK");
         }
 
-        // RPUSH key value_1 ... value_n
-        std::string rpush(std::queue<std::string>& args) {
+        std::string push_w_func(
+            std::queue<std::string>& args,
+            std::function<void(std::vector<std::string>&, const std::string&)> insert_fn) {
             if(args.size() < 2)
                 return get_simple_string("-ERR wrong number of arguments for 'rpush' command");
 
@@ -235,7 +237,7 @@ namespace redis {
                     if (list == nullptr) {
                         return get_simple_string("-WRONGTYPE Operation against a key holding the wrong kind of value");
                     }
-                    list->emplace_back(value);
+                    insert_fn(*list, value);
                 } else {
                     DataPoint data{std::vector<std::string>{value}, std::chrono::steady_clock::now(), expiry_ms};
                     cache.put(key, data);
@@ -245,7 +247,20 @@ namespace redis {
             auto list = std::get_if<std::vector<std::string>>(&cache.get(key)->get().value);
             return get_resp_int(std::to_string(list->size()));
         }
-
+        // RPUSH key value_1 ... value_n
+        std::string rpush(std::queue<std::string>& args) {
+            return push_w_func(args,
+                [](std::vector<std::string>& list, const std::string& value) {
+                    list.emplace_back(value);
+              });
+        }
+        // LPUSH key_list value_1 ... value_n (value_n ... value_1)
+        std::string lpush(std::queue<std::string>& args) {
+            return push_w_func(args,
+                [](std::vector<std::string>& list, const std::string& value) {
+                    list.insert(list.begin(), value);
+              });
+        }
         // LRANGE key start stop
         std::string lrange(std::queue<std::string>& args) {
             if(args.size() != 3)
@@ -301,6 +316,8 @@ namespace redis {
                 return ping();
             if (command == "GET")
                 return get(resp_array);
+            if (command == "LPUSH")
+                return lpush(resp_array);
             if (command == "LRANGE")
                 return lrange(resp_array);
             if (command == "SET")
@@ -333,6 +350,11 @@ namespace redis {
             flags |= O_NONBLOCK;
             return fcntl(socket_fd, F_SETFL, flags);
         }
+        std::optional<std::string> has_expected_args(std::queue<std::string>& args, const size_t expected) {
+          if(args.size() < expected)
+              return "-ERR wrong number of arguments";
+          return std::nullopt;
+      }
     };
 
 } // namespace redis
