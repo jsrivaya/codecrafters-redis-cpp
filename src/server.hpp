@@ -191,7 +191,7 @@ namespace redis {
                 auto entry_expire_time_ms =
                     std::chrono::duration_cast<std::chrono::milliseconds>(entry_expire_time.time_since_epoch()).count();                
                 if (data.expiry_ms > 0 && now >= entry_expire_time)
-                    return get_nil_bulk_string();
+                    return get_null_bulk_string();
 
                 if (!std::holds_alternative<std::string>(data.value)) {
                     return get_simple_string("-WRONGTYPE Operation against a key holding the wrong kind of value");
@@ -199,7 +199,7 @@ namespace redis {
                 return get_bulk_string(std::get<std::string>(data.value));
             }
 
-            return get_nil_bulk_string();
+            return get_null_bulk_string();
         }
 
         // SET key value
@@ -299,6 +299,33 @@ namespace redis {
             return get_resp_int("0");
         }
 
+        // LPOP key
+        std::string lpop(std::queue<std::string>& args) {
+            if (args.size() != 1) {
+                return get_simple_string("-ERR wrong number of arguments for 'lpop' command");
+            }
+
+            const auto key = args.front();
+            if (auto data_ref = cache.get(key); data_ref) {
+                auto& data = data_ref->get();
+                auto list = std::get_if<std::vector<std::string>>(&data.value);
+                if (list == nullptr) {
+                    return get_simple_string("-WRONGTYPE Operation against a key holding the wrong kind of value");
+                }
+                if (list->empty()) {
+                    cache.remove(key);
+                    return get_null_bulk_string();
+                }
+                const auto value = std::move(list->front());
+                list->erase(list->begin());
+                if (list->empty()) {
+                    cache.remove(key);
+                }
+                return get_bulk_string(value);
+            }
+            return get_null_bulk_string();
+        }
+
         // LRANGE key start stop
         std::string lrange(std::queue<std::string>& args) {
             if(args.size() != 3) {
@@ -358,6 +385,8 @@ namespace redis {
                 return get(resp_array);
             if (command == "LLEN")
                 return llen(resp_array);
+            if (command == "LPOP")
+                return lpop(resp_array);
             if (command == "LPUSH")
                 return lpush(resp_array);
             if (command == "LRANGE")
@@ -370,7 +399,7 @@ namespace redis {
             throw std::runtime_error("unknown_command");
         }
 
-        std::string get_nil_bulk_string() {
+        std::string get_null_bulk_string() {
             return "$-1\r\n";
         }
         std::string get_bulk_string(const std::string& s) {
