@@ -183,7 +183,7 @@ namespace redis {
         }
 
         std::string get(const std::queue<std::string>& args) {
-            auto key = args.front();
+            const auto key = args.front();
 
             if (cache.exists(key)) {
                 auto data_ref = cache.get(key);
@@ -207,7 +207,7 @@ namespace redis {
 
         // SET key value
         std::string set(std::queue<std::string>& args) {
-            auto key = args.front();
+            const auto key = args.front();
             args.pop();
             auto value = args.front();
             args.pop();
@@ -241,10 +241,11 @@ namespace redis {
         std::string push_w_func(
             std::queue<std::string>& args,
             std::function<void(std::vector<std::string>&, const std::string&)> insert_fn) {
-            if(args.size() < 2)
+            if(args.size() < 2) {
                 return get_simple_string("-ERR wrong number of arguments for 'rpush' command");
+            }
 
-            auto key = args.front();
+            const auto key = args.front();
             args.pop();
 
             while (!args.empty()) {
@@ -282,16 +283,36 @@ namespace redis {
                     list.insert(list.begin(), value);
               });
         }
+
+        // LLEN key
+        std::string llen(std::queue<std::string>& args) {
+            if (args.size() != 1) {
+                return get_simple_string("-ERR wrong number of arguments for 'llen' command");
+            }
+
+            const auto key = args.front();
+            if (auto data_ref = cache.get(key); data_ref) {
+                auto& data = data_ref->get();
+                auto list = std::get_if<std::vector<std::string>>(&data.value);
+                if (list == nullptr) {
+                    return get_simple_string("-WRONGTYPE Operation against a key holding the wrong kind of value");
+                }
+                return get_resp_int(std::to_string(list->size())); 
+            }
+            return get_resp_int("0");
+        }
+
         // LRANGE key start stop
         std::string lrange(std::queue<std::string>& args) {
-            if(args.size() != 3)
+            if(args.size() != 3) {
                 return get_simple_string("-ERR wrong number of arguments for 'lrange' command");
+            }
 
-            auto key = args.front();
+            const auto key = args.front();
             args.pop();
 
             auto data_ref = cache.get(key);
-            if(!data_ref) return get_empty_resp_array();
+            if(!data_ref) { return get_empty_resp_array(); }
 
             auto start = args.front();
             args.pop();
@@ -338,6 +359,8 @@ namespace redis {
                 return ping();
             if (command == "GET")
                 return get(resp_array);
+            if (command == "LLEN")
+                return llen(resp_array);
             if (command == "LPUSH")
                 return lpush(resp_array);
             if (command == "LRANGE")
