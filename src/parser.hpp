@@ -26,13 +26,17 @@ namespace redis {
     }
 
     int get_array_size(const std::string& resp, int& index) {
-        Logger::getInstance().debug(__func__, "resp: " + resp + "; index: " + std::to_string(index));
+        constexpr int MAX_ARRAY_SIZE = 1000000;
         if (index < resp.length() && resp[index] == '*') {
             ++index;
 
             int n = 0;
             while (index < resp.length() && std::isdigit(resp[index])) {
                 int digit = resp[index] - '0';
+                if (n > MAX_ARRAY_SIZE / 10 ||
+                    (n == MAX_ARRAY_SIZE / 10 && digit > MAX_ARRAY_SIZE % 10)) {
+                    throw std::runtime_error("Array size exceeds maximum allowed");
+                }
                 n = n * 10 + digit;
                 ++index;
             }
@@ -45,7 +49,6 @@ namespace redis {
     }
 
     std::string get_element(const std::string& resp, int& index) {
-        Logger::getInstance().debug(__func__, "resp: " + resp + "; index: " + std::to_string(index));
         // 1. read element identifier {+, -, :, *, $}
         std::string valid = "+-:$*";
         if (index < resp.length() && valid.find(resp[index]) == std::string::npos)
@@ -55,8 +58,13 @@ namespace redis {
 
         // 2. read 'n'
         int n = 0;
+        constexpr int MAX_ARRAY_SIZE = 1000000;
         while (index < resp.length() && std::isdigit(resp[index])) {
             int digit = resp[index] - '0';
+            if (n > MAX_ARRAY_SIZE / 10 ||
+                (n == MAX_ARRAY_SIZE / 10 && digit > MAX_ARRAY_SIZE % 10)) {
+                throw std::runtime_error("Array size exceeds maximum allowed");
+            }
             n = n * 10 + digit;
             ++index;
         }
@@ -115,7 +123,11 @@ namespace redis {
         size_t pos = 1;
 
         size_t array_size = 0;
+        constexpr int MAX_ARRAY_SIZE = 1000000;
         while (pos < buffer.size() && std::isdigit(buffer[pos])) {
+            if (array_size > MAX_ARRAY_SIZE / 10) {
+                return false;  // Invalid message, too large
+            }
             array_size = array_size * 10 + (buffer[pos] - '0');
             ++pos;
         }
@@ -131,6 +143,9 @@ namespace redis {
 
             auto param_size = 0;
             while (pos < buffer.size() && std::isdigit(buffer[pos])) {
+                if (param_size > MAX_ARRAY_SIZE / 10) {
+                    return false;  // Invalid message
+                }
                 param_size = param_size * 10 + (buffer[pos] - '0');
                 ++pos;
             }
