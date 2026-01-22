@@ -16,8 +16,6 @@
 #include <vector>
 
 namespace redis {
-#define MAX_EVENTS 10
-
     enum DataType {
         STRING,     // Basic type for text or binary data.
         HASH,       // Field-value pairs, useful for representing objects.
@@ -56,7 +54,6 @@ namespace redis {
             epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event);
 
             epoll_event events[MAX_EVENTS];
-            constexpr size_t MAX_CLIENTS = 10000;
             while (true) {
                 /**
                  * @brief timeout of -1 causes epoll_wait() to block indefinitely, while
@@ -67,7 +64,6 @@ namespace redis {
                 for (int i = 0; i < n_fds; ++i) {
                     auto event_fd = events[i].data.fd;
                     if (event_fd == server_fd) { // Accept new client connection
-                        constexpr size_t MAX_CLIENTS = 10000;
                         if (clients.size() >= MAX_CLIENTS) {
                             int temp_fd = accept(server_fd, NULL, NULL);
                             if (temp_fd >= 0) {
@@ -93,7 +89,7 @@ namespace redis {
                             close(event_fd);
                             clients.erase(event_fd);
                         } else if (count > 0) {
-                            if (clients[event_fd].buffer.size() + count > clients[event_fd].MAX_BUFFER_SIZE) {
+                            if (clients[event_fd].buffer.size() + count > MAX_BUFFER_SIZE) {
                                 std::cerr << "Buffer limit exceeded for client " << event_fd << std::endl;
                                 close(event_fd);
                                 clients.erase(event_fd);
@@ -102,9 +98,9 @@ namespace redis {
                             clients[event_fd].buffer += std::string(buf, count);
                             try { // Try to parse from buffer
                                 if (has_complete_message(clients[event_fd].buffer)) {
-                                    cmd_pipeline = get_resp_array(clients[event_fd].buffer);
+                                    auto cmd_pipeline = get_resp_array(clients[event_fd].buffer);
                                     // ... process ...
-                                    auto response = get_response(cmd_pipeline);
+                                    const auto response = get_response(cmd_pipeline);
                                     write(event_fd, response.c_str(), response.size()); // Respond
                                 }
                             } catch (const std::exception& e) {
@@ -124,13 +120,14 @@ namespace redis {
         struct ClientConnection {
             int client_fd;
             std::string buffer;
-            static constexpr size_t MAX_BUFFER_SIZE = 512 * 1024;  // 512KB limit
         };
         int server_fd;
         struct sockaddr_in server_addr;
-        std::queue<std::string> cmd_pipeline{};
         looneytools::LRUCache<std::string, DataPoint> cache{10000};
         std::unordered_map<int, ClientConnection> clients;
+        static constexpr size_t MAX_EVENTS = 10;
+        static constexpr size_t MAX_CLIENTS = 10000;
+        static constexpr size_t MAX_BUFFER_SIZE = 512 * 1024;  // 512KB limit
 
         RedisServer() {
             server_fd = socket(AF_INET, SOCK_STREAM, 0);
