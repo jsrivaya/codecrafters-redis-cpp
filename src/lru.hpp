@@ -36,6 +36,10 @@ public:
         return map.find(key) != map.end();
     }
 
+    void remove(const K& key) {
+        map.erase(key);
+    }
+
 private:
     size_t capacity;
     std::list<std::pair<K, V>> store;  // MRU at front, LRU at back
