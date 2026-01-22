@@ -187,18 +187,19 @@ namespace redis {
 
             if (cache.exists(key)) {
                 auto data_ref = cache.get(key);
+                auto& data = data_ref->get();
                 auto now = std::chrono::steady_clock::now();
                 auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-                auto entry_expire_time = data_ref->get().timestamp + std::chrono::milliseconds(data_ref->get().expiry_ms);
+                auto entry_expire_time = data.timestamp + std::chrono::milliseconds(data.expiry_ms);
                 auto entry_expire_time_ms =
                     std::chrono::duration_cast<std::chrono::milliseconds>(entry_expire_time.time_since_epoch()).count();                
-                if (data_ref->get().expiry_ms > 0 && now >= entry_expire_time)
+                if (data.expiry_ms > 0 && now >= entry_expire_time)
                     return get_nil_bulk_string();
 
-                if (!std::holds_alternative<std::string>(data_ref->get().value)) {
+                if (!std::holds_alternative<std::string>(data.value)) {
                     return get_simple_string("-WRONGTYPE Operation against a key holding the wrong kind of value");
                 }
-                return get_bulk_string(std::get<std::string>(data_ref->get().value));
+                return get_bulk_string(std::get<std::string>(data.value));
             }
 
             return get_nil_bulk_string();
@@ -213,8 +214,8 @@ namespace redis {
 
             unsigned expiry_ms = 0; // default value
 
-            auto data_ref = cache.get(key);
-            if (data_ref && !std::holds_alternative<std::string>(data_ref->get().value)) {
+            if(auto data_ref = cache.get(key);
+                data_ref && !std::holds_alternative<std::string>(data_ref->get().value)) {
                 return get_simple_string("-WRONGTYPE Operation against a key holding the wrong kind of value");
             }
 
@@ -251,9 +252,9 @@ namespace redis {
                 args.pop();
                 unsigned expiry_ms = 0; // default value
 
-                auto data_ref = cache.get(key);
-                if(data_ref) {
-                    auto list = std::get_if<std::vector<std::string>>(&data_ref->get().value);
+                if(auto data_ref = cache.get(key); data_ref) {
+                    auto& data = data_ref->get();
+                    auto list = std::get_if<std::vector<std::string>>(&data.value);
                     if (list == nullptr) {
                         return get_simple_string("-WRONGTYPE Operation against a key holding the wrong kind of value");
                     }
@@ -302,7 +303,8 @@ namespace redis {
             auto start_i = std::stoi(start);
             auto end_i = std::stoi(end);
 
-            auto list = std::get_if<std::vector<std::string>>(&data_ref->get().value);
+            auto& data = data_ref->get();
+            auto list = std::get_if<std::vector<std::string>>(&data.value);
             if (list == nullptr) {
                 return get_simple_string("-WRONGTYPE Operation against a key holding the wrong kind of value");
             }
