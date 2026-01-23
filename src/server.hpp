@@ -301,11 +301,23 @@ namespace redis {
 
         // LPOP key
         std::string lpop(std::queue<std::string>& args) {
-            if (args.size() != 1) {
+            if (args.size() > 2) {
                 return get_simple_string("-ERR wrong number of arguments for 'lpop' command");
             }
+            auto npop = 1; // default number of elements to pop
 
             const auto key = args.front();
+            args.pop();
+
+            if (!args.empty()) {
+                auto arg = args.front();
+                size_t pos;
+                npop = std::stoi(arg, &pos);
+                if(pos != arg.length()) {
+                    return get_simple_string("-WRONGTYPE Operation requesting the wrong kind of argument");
+                }
+            }
+
             if (auto data_ref = cache.get(key); data_ref) {
                 auto& data = data_ref->get();
                 auto list = std::get_if<std::vector<std::string>>(&data.value);
@@ -316,12 +328,17 @@ namespace redis {
                     cache.remove(key);
                     return get_null_bulk_string();
                 }
-                const auto value = std::move(list->front());
-                list->erase(list->begin());
-                if (list->empty()) {
-                    cache.remove(key);
+
+                std::vector<std::string> sublist(
+                    std::make_move_iterator(list->begin()),
+                    std::make_move_iterator(list->begin() + npop)
+                );
+                list->erase(list->begin(), list->begin() + npop);
+
+                if (sublist.size() > 1) {
+                    return get_resp_array_string(sublist);
                 }
-                return get_bulk_string(value);
+                return get_bulk_string(sublist.front());
             }
             return get_null_bulk_string();
         }
@@ -410,6 +427,13 @@ namespace redis {
         }
         std::string get_resp_int(const std::string& s) {
             return ":" + s + "\r\n";
+        }
+        std::string get_resp_array_string(const std::vector<std::string>& elements) {
+            auto resp_array = "*" + std::to_string(elements.size()) + "\r\n";
+            for (const auto& e : elements) {
+                resp_array += get_bulk_string(e);
+            }
+            return resp_array;
         }
         std::string get_empty_resp_array() {
             return "*0\r\n";
