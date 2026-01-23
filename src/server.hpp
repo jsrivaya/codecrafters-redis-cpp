@@ -47,87 +47,40 @@ namespace redis {
         }
 
         void run() {
-            int epoll_fd = epoll_create1(0); // Creates an epoll instance
-            epoll_event event;
-            event.data.fd = server_fd;
-            event.events = EPOLLIN; // Monitor for incoming connections
-            epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event);
-
-            epoll_event events[MAX_EVENTS];
             while (true) {
                 /**
                  * @brief timeout of -1 causes epoll_wait() to block indefinitely, while
                  * specifying a timeout equal to zero causes epoll_wait() to return
                  * immediately, even if no events are available
                  **/
-                int n_fds = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
-                for (int i = 0; i < n_fds; ++i) {
+                const auto n_fds = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
+                for (size_t i = 0; i < n_fds; ++i) {
                     auto event_fd = events[i].data.fd;
                     if (event_fd == server_fd) { // Accept new client connection
-                        if (clients.size() >= MAX_CLIENTS) {
-                            int temp_fd = accept(server_fd, NULL, NULL);
-                            if (temp_fd >= 0) {
-                                constexpr std::string_view error = "-ERR max number of clients reached\r\n";
-                                write(temp_fd, error.data(), error.size());
-                                close(temp_fd);
-                            }
-                            continue;
-                        }
-                        auto client_fd = accept(server_fd, NULL, NULL);
-                        if (client_fd < 0) {
-                            throw std::runtime_error("redis server: failed to accept connection");
-                        }
-                        make_socket_non_blocking(client_fd);
-                        event.data.fd = client_fd;
-                        event.events = EPOLLIN | EPOLLET;
-                        epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &event);
-                        clients[client_fd] = ClientConnection{client_fd, ""};
+                        handle_new_connection();
                     } else { // Handle data from client
-                        char buf[2048];
-                        ssize_t count = read(event_fd, buf, sizeof(buf));
-                        if (count == 0) { // EOF - client disconnected
-                            close(event_fd);
-                            clients.erase(event_fd);
-                        } else if (count > 0) {
-                            if (clients[event_fd].buffer.size() + count > MAX_BUFFER_SIZE) {
-                                std::cerr << "Buffer limit exceeded for client " << event_fd << std::endl;
-                                close(event_fd);
-                                clients.erase(event_fd);
-                                continue;
-                            }
-                            clients[event_fd].buffer += std::string(buf, count);
-                            try { // Try to parse from buffer
-                                if (has_complete_message(clients[event_fd].buffer)) {
-                                    auto cmd_pipeline = get_resp_array(clients[event_fd].buffer);
-                                    // ... process ...
-                                    const auto response = get_response(cmd_pipeline);
-                                    write(event_fd, response.c_str(), response.size()); // Respond
-                                }
-                            } catch (const std::exception& e) {
-                                std::cerr << e.what() << std::endl;
-                            }
-                            // We do not bulk messages yet: clear buffer
-                            clients[event_fd].buffer.clear();
-                        } else {
-                            std::cerr << "error on read: " << errno << std::endl;
-                        }
+                        process_client_event(event_fd);
                     }
                 }
             }
         }
 
       private:
+        static constexpr size_t MAX_EVENTS = 10;
+        static constexpr size_t MAX_CLIENTS = 10000;
+        static constexpr size_t MAX_BUFFER_SIZE = 512 * 1024;  // 512KB limit
+
         struct ClientConnection {
             int client_fd;
             std::string buffer;
         };
+
         int server_fd;
+        int epoll_fd;
+        epoll_event events[MAX_EVENTS];
         struct sockaddr_in server_addr;
         looneytools::LRUCache<std::string, DataPoint> cache{10000};
         std::unordered_map<int, ClientConnection> clients;
-        static constexpr size_t MAX_EVENTS = 10;
-        static constexpr size_t MAX_CLIENTS = 10000;
-        static constexpr size_t MAX_BUFFER_SIZE = 512 * 1024;  // 512KB limit
 
         RedisServer() {
             server_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -158,12 +111,32 @@ namespace redis {
                 std::cerr << "listen failed\n";
                 throw std::runtime_error("redis server: listen failed");
             }
+
+            // initialize epoll events
+            init_epoll();
         };
 
         RedisServer(const RedisServer&) = delete;
         RedisServer& operator=(const RedisServer&) = delete;
         ~RedisServer() {
-            close(server_fd);
+            if (epoll_fd != -1) close(epoll_fd);
+            if (server_fd != -1) close(server_fd);
+        }
+
+        void init_epoll() {
+            epoll_fd = epoll_create1(0); // Creates an epoll instance
+            epoll_event event;
+            event.data.fd = server_fd;
+            event.events = EPOLLIN; // Monitor for incoming connections only
+            epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event);
+        }
+
+        void register_client(const int fd) {
+            epoll_event event;
+            event.data.fd = fd;
+            event.events = EPOLLIN | EPOLLET;
+            epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &event);
+            clients[fd] = ClientConnection{fd, ""};
         }
 
         std::string ping() {
@@ -449,7 +422,66 @@ namespace redis {
           if(args.size() < expected)
               return "-ERR wrong number of arguments";
           return std::nullopt;
-      }
+        }
+        void remove_client(const int fd) {
+            close(fd);
+            clients.erase(fd);
+            // TODO: remove from blocking lists
+        }
+
+        void handle_new_connection() {
+            if (clients.size() >= MAX_CLIENTS) {
+                // consume the request and return error
+                return handle_max_connections();
+            }
+            auto client_fd = accept(server_fd, NULL, NULL);
+            if (client_fd < 0) {
+                throw std::runtime_error("redis server: failed to accept connection");
+            }
+            make_socket_non_blocking(client_fd);
+            register_client(client_fd);
+        }
+
+        void handle_max_connections() {
+            if (auto fd = accept(server_fd, NULL, NULL); fd >= 0) {
+                constexpr std::string_view error = "-ERR max number of clients reached\r\n";
+                write(fd, error.data(), error.size());
+                close(fd);
+            } else {
+                throw std::runtime_error("redis server: failed to handle max connections");
+            }
+        }
+
+        void process_client_event(const int fd) {
+            char received_buf[2048];
+            ssize_t count = read(fd, received_buf, sizeof(received_buf));
+            if (count == 0) { // EOF - client disconnected
+                remove_client(fd);
+            } else if (count > 0) {
+                if (clients[fd].buffer.size() + count > MAX_BUFFER_SIZE) {
+                    std::cerr << "Buffer limit exceeded for client " << fd << std::endl;
+                    remove_client(fd);
+                    return;
+                }
+                clients[fd].buffer += std::string(received_buf, count);
+                try { // Try to parse from buffer
+                    if (has_complete_message(clients[fd].buffer)) {
+
+                        auto cmd_pipeline = get_resp_array(clients[fd].buffer);
+                        // ... process ...
+
+                        const auto response = get_response(cmd_pipeline);
+                        write(fd, response.c_str(), response.size()); // Respond
+                    }
+                } catch (const std::exception& e) {
+                    std::cerr << e.what() << std::endl;
+                }
+                // We do not bulk messages yet: clear buffer
+                clients[fd].buffer.clear();
+            } else {
+                std::cerr << "error on read: " << errno << std::endl;
+            }
+        }
     };
 
 } // namespace redis
