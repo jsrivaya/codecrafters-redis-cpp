@@ -132,7 +132,7 @@ namespace redis {
 
         int wait_for_event() {
             // Wait until earliest blocked client timeout
-            auto timeout_ms = 0;
+            auto timeout_ms = -1;
             if (!blocked_clients_pq.empty()) {
                 auto now = std::chrono::steady_clock::now();
                 auto earliest_timeout = blocked_clients_pq.top().timeout_point;
@@ -356,6 +356,9 @@ namespace redis {
                 if(pos != arg.length()) {
                     return get_simple_string("-WRONGTYPE Operation requesting the wrong kind of argument");
                 }
+                if (npop <= 0) {
+                    return get_simple_string("-ERR value is out of range, must be positive");
+                }
             }
 
             if (auto data_ref = cache.get(key); data_ref) {
@@ -369,6 +372,9 @@ namespace redis {
                     return get_null_bulk_string();
                 }
 
+                if (npop > list->size()) {
+                    npop = list->size();
+                }
                 std::vector<std::string> sublist(
                     std::make_move_iterator(list->begin()),
                     std::make_move_iterator(list->begin() + npop)
@@ -471,7 +477,7 @@ namespace redis {
         void remove_client(const int fd) {
             close(fd);
             clients.erase(fd);
-            // TODO: remove from blocking lists
+            cleanup_blocked_client(fd);
         }
 
         void handle_new_connection() {
@@ -539,10 +545,13 @@ namespace redis {
         std::unordered_multimap<std::string, int> key_to_blocked_clients;
         // 3. Set of blocked fds (for quick existence checks)
         std::unordered_set<int> blocked_fds;
+        // 4. client fd to key for quick find of blocked clients
+        std::unordered_map<int, std::vector<std::string>> fd_to_keys;
 
         void block_client(const int fd, std::vector<std::string>& keys, const std::chrono::steady_clock::time_point timeout_point) {
             blocked_clients_pq.push(BlockedClient{fd, timeout_point, keys});
             blocked_fds.insert(fd);
+            fd_to_keys[fd] = keys;
 
             for (const auto& key : keys) {  // Register for ALL keys, even non-existent
                 key_to_blocked_clients.emplace(key, fd);
@@ -556,26 +565,29 @@ namespace redis {
             for (auto it = range.first; it != range.second; ++it) {
                 auto fd = it->second;
                 if (blocked_fds.count(fd)) {
-                    std::cerr << "Sending value: " << value << "; to client" << std::endl;
                     send_to_client(fd, get_resp_array_string({key, value}));
                     cleanup_blocked_client(fd);
                     break;
                 }
             }
-            std::cerr << "Done" << std::endl;
         }
         void cleanup_blocked_client(const int fd) {
             // Remove this client from ALL key registrations
             blocked_fds.erase(fd);
-            for (auto it = key_to_blocked_clients.begin(); it != key_to_blocked_clients.end(); ) {
-                if (it->second == fd) {
-                    it = key_to_blocked_clients.erase(it);
-                } else {
-                    ++it;
+
+            auto it = fd_to_keys.find(fd);
+            if (it == fd_to_keys.end()) return;
+            for (const auto& key : it->second) {
+                auto range = key_to_blocked_clients.equal_range(key);
+                for (auto kt = range.first; kt != range.second; ) {
+                    if (kt->second == fd) {
+                        kt = key_to_blocked_clients.erase(kt);
+                        break;
+                    }
+                    ++kt;
                 }
             }
-
-            // Also remove from priority queue (requires rebuilding or lazy deletion)
+            fd_to_keys.erase(fd);
         }
         void cleanup_timeout_clients() {
             while (!blocked_clients_pq.empty()) {
