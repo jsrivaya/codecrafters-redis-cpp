@@ -10,8 +10,11 @@
 #include <sys/epoll.h>
 #include <sys/fcntl.h>
 #include <sys/socket.h>
+
+#include <queue>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <variant>
 #include <vector>
 
@@ -48,17 +51,13 @@ namespace redis {
 
         void run() {
             while (true) {
-                /**
-                 * @brief timeout of -1 causes epoll_wait() to block indefinitely, while
-                 * specifying a timeout equal to zero causes epoll_wait() to return
-                 * immediately, even if no events are available
-                 **/
-                const auto n_fds = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
+                cleanup_timeout_clients();
+                const auto n_fds = wait_for_event();
                 for (size_t i = 0; i < n_fds; ++i) {
                     auto event_fd = events[i].data.fd;
-                    if (event_fd == server_fd) { // Accept new client connection
+                    if (event_fd == server_fd) {
                         handle_new_connection();
-                    } else { // Handle data from client
+                    } else {
                         process_client_event(event_fd);
                     }
                 }
@@ -129,6 +128,19 @@ namespace redis {
             event.data.fd = server_fd;
             event.events = EPOLLIN; // Monitor for incoming connections only
             epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event);
+        }
+
+        int wait_for_event() {
+            // Wait until earliest blocked client timeout
+            auto timeout_ms = 0;
+            if (!blocked_clients_pq.empty()) {
+                auto now = std::chrono::steady_clock::now();
+                auto earliest_timeout = blocked_clients_pq.top().timeout_point;
+                auto duration = earliest_timeout - now;
+                timeout_ms = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+                timeout_ms = std::max(0, timeout_ms);  // Clamp to 0 if negative
+            }
+            return epoll_wait(epoll_fd, events, MAX_EVENTS, timeout_ms);
         }
 
         void register_client(const int fd) {
@@ -212,7 +224,7 @@ namespace redis {
             std::queue<std::string>& args,
             std::function<void(std::vector<std::string>&, const std::string&)> insert_fn) {
             if(args.size() < 2) {
-                return get_simple_string("-ERR wrong number of arguments for 'rpush' command");
+                return get_simple_string("-ERR wrong number of arguments for 'push' command");
             }
 
             const auto key = args.front();
@@ -221,8 +233,13 @@ namespace redis {
             while (!args.empty()) {
                 auto value = args.front();
                 args.pop();
-                unsigned expiry_ms = 0; // default value
 
+                if (has_blocked_client(key)) {
+                    unblock_and_handoff_value(key, value);
+                    continue;
+                }
+
+                unsigned expiry_ms = 0; // default value
                 if(auto data_ref = cache.get(key); data_ref) {
                     auto& data = data_ref->get();
                     auto list = std::get_if<std::vector<std::string>>(&data.value);
@@ -236,8 +253,11 @@ namespace redis {
                 }
             }
 
-            auto list = std::get_if<std::vector<std::string>>(&cache.get(key)->get().value);
-            return get_resp_int(std::to_string(list->size()));
+            if(auto data_ref = cache.get(key); data_ref) {
+                auto list = std::get_if<std::vector<std::string>>(&cache.get(key)->get().value);
+                return get_resp_int(std::to_string(list->size()));
+            }
+            return get_resp_int("1");
         }
         // RPUSH key value_1 ... value_n
         std::string rpush(std::queue<std::string>& args) {
@@ -270,6 +290,53 @@ namespace redis {
                 return get_resp_int(std::to_string(list->size())); 
             }
             return get_resp_int("0");
+        }
+
+        // BLPOP key1 key2 ... timeout
+        std::optional<std::string> blpop(const int fd, std::queue<std::string>& args) {
+            std::vector<std::string> keys;
+            while (args.size() > 1) {
+                keys.emplace_back(std::move(args.front()));
+                args.pop();
+            }
+
+            size_t size;
+            auto arg = args.front();
+            args.pop();
+
+            auto timeout_s = std::stod(arg, &size);
+            if (size != arg.length()) {
+                return get_simple_string("-ERR timeout is not a valid float");
+            }
+            std::chrono::steady_clock::time_point timeout_point;
+            if (timeout_s == 0) {
+                // Block forever - use maximum time_point
+                timeout_point = std::chrono::steady_clock::time_point::max();
+            } else {
+                // Block for specified duration
+                auto timeout_ms = std::chrono::milliseconds(static_cast<long long>(timeout_s * 1000));
+                timeout_point = std::chrono::steady_clock::now() + timeout_ms;
+            }
+
+            for (const auto& key : keys) {
+                // pop and return the first value available in any of the keys
+                if (auto data_ref = cache.get(key); data_ref) {
+                    auto& data = data_ref->get();
+                    auto list = std::get_if<std::vector<std::string>>(&data.value);
+                    if (!list) {
+                        return get_simple_string("-WRONGTYPE Operation against a key holding the wrong kind of value");
+                    }
+                    if (!list->empty()) {
+                        const auto value = std::move(list->front());
+                        list->erase(list->begin());
+                        return get_resp_array_string({key,value});
+                    }
+                }
+            }
+            // none of the lists has values - block
+            block_client(fd, keys, timeout_point);
+
+            return "";  // Don't send response yet  
         }
 
         // LPOP key
@@ -364,31 +431,6 @@ namespace redis {
             return result;
         }
 
-        std::string get_response(std::queue<std::string>& resp_array) {
-            auto command = resp_array.front();
-            resp_array.pop();
-            if (command == "ECHO")
-                return echo(resp_array);
-            if (command == "PING")
-                return ping();
-            if (command == "GET")
-                return get(resp_array);
-            if (command == "LLEN")
-                return llen(resp_array);
-            if (command == "LPOP")
-                return lpop(resp_array);
-            if (command == "LPUSH")
-                return lpush(resp_array);
-            if (command == "LRANGE")
-                return lrange(resp_array);
-            if (command == "SET")
-                return set(resp_array);
-            if (command == "RPUSH")
-                return rpush(resp_array);
-
-            throw std::runtime_error("unknown_command");
-        }
-
         std::string get_null_bulk_string() {
             return "$-1\r\n";
         }
@@ -410,6 +452,9 @@ namespace redis {
         }
         std::string get_empty_resp_array() {
             return "*0\r\n";
+        }
+        std::string get_null_resp_array() {
+            return "*-1\r\n";
         }
         int make_socket_non_blocking(int socket_fd) {
             int flags = fcntl(socket_fd, F_GETFL, 0);
@@ -452,35 +497,142 @@ namespace redis {
             }
         }
 
+        std::optional<std::string> handle_client_message(const int client_fd, const std::string& message) {
+            auto resp_array = get_resp_array(message);
+
+            auto command = resp_array.front();
+            resp_array.pop();
+            if (command == "BLPOP")
+                return blpop(client_fd, resp_array);
+            if (command == "ECHO")
+                return echo(resp_array);
+            if (command == "PING")
+                return ping();
+            if (command == "GET")
+                return get(resp_array);
+            if (command == "LLEN")
+                return llen(resp_array);
+            if (command == "LPOP")
+                return lpop(resp_array);
+            if (command == "LPUSH")
+                return lpush(resp_array);
+            if (command == "LRANGE")
+                return lrange(resp_array);
+            if (command == "SET")
+                return set(resp_array);
+            if (command == "RPUSH")
+                return rpush(resp_array);
+
+            throw std::runtime_error("unknown_command");
+        }
+        struct BlockedClient {
+            int fd;
+            std::chrono::steady_clock::time_point timeout_point;
+            std::vector<std::string> keys;  // All keys this client is waiting on
+            bool operator>(const BlockedClient& other) const {
+                return timeout_point > other.timeout_point;
+            }
+        };
+        // 1. Priority queue ordered by timeout (earliest timeout at top)
+        std::priority_queue<BlockedClient, std::vector<BlockedClient>, std::greater<BlockedClient>> blocked_clients_pq;
+        // 2. Multimap: key -> client_fd (for quick lookup when a key gets data)
+        std::unordered_multimap<std::string, int> key_to_blocked_clients;
+        // 3. Set of blocked fds (for quick existence checks)
+        std::unordered_set<int> blocked_fds;
+
+        void block_client(const int fd, std::vector<std::string>& keys, const std::chrono::steady_clock::time_point timeout_point) {
+            blocked_clients_pq.push(BlockedClient{fd, timeout_point, keys});
+            blocked_fds.insert(fd);
+
+            for (const auto& key : keys) {  // Register for ALL keys, even non-existent
+                key_to_blocked_clients.emplace(key, fd);
+            }
+        }
+        bool has_blocked_client(const std::string& key) {
+            return key_to_blocked_clients.find(key) != key_to_blocked_clients.end();
+        }
+        void unblock_and_handoff_value(const std::string& key, const std::string& value) {
+            auto range = key_to_blocked_clients.equal_range(key);
+            for (auto it = range.first; it != range.second; ++it) {
+                auto fd = it->second;
+                if (blocked_fds.count(fd)) {
+                    std::cerr << "Sending value: " << value << "; to client" << std::endl;
+                    send_to_client(fd, get_resp_array_string({key, value}));
+                    cleanup_blocked_client(fd);
+                    break;
+                }
+            }
+            std::cerr << "Done" << std::endl;
+        }
+        void cleanup_blocked_client(const int fd) {
+            // Remove this client from ALL key registrations
+            blocked_fds.erase(fd);
+            for (auto it = key_to_blocked_clients.begin(); it != key_to_blocked_clients.end(); ) {
+                if (it->second == fd) {
+                    it = key_to_blocked_clients.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+
+            // Also remove from priority queue (requires rebuilding or lazy deletion)
+        }
+        void cleanup_timeout_clients() {
+            while (!blocked_clients_pq.empty()) {
+                auto& blocked = blocked_clients_pq.top();
+
+                // Check if already expired
+                if (blocked.timeout_point > std::chrono::steady_clock::now()) {
+                    break;  // No more timeouts yet
+                }
+
+                // Timeout expired - but check if client is still actually blocked
+                if (blocked_fds.count(blocked.fd)) {
+                    // Client is still blocked - send timeout response
+                    send_to_client(blocked.fd, get_null_resp_array());
+                    cleanup_blocked_client(blocked.fd);
+                }
+                // else: Client was already unblocked by data arrival - skip
+
+                blocked_clients_pq.pop();  // Remove (either handled or stale)
+            }
+        }
+
         void process_client_event(const int fd) {
             char received_buf[2048];
+
             ssize_t count = read(fd, received_buf, sizeof(received_buf));
             if (count == 0) { // EOF - client disconnected
                 remove_client(fd);
-            } else if (count > 0) {
+                return;
+            }
+
+            if (count > 0) {
                 if (clients[fd].buffer.size() + count > MAX_BUFFER_SIZE) {
                     std::cerr << "Buffer limit exceeded for client " << fd << std::endl;
                     remove_client(fd);
                     return;
                 }
                 clients[fd].buffer += std::string(received_buf, count);
-                try { // Try to parse from buffer
+                try {
                     if (has_complete_message(clients[fd].buffer)) {
+                        auto response_opt = handle_client_message(fd, clients[fd].buffer);
 
-                        auto cmd_pipeline = get_resp_array(clients[fd].buffer);
-                        // ... process ...
-
-                        const auto response = get_response(cmd_pipeline);
-                        write(fd, response.c_str(), response.size()); // Respond
+                        // Only send response if we have one (non-blocking command)
+                        if (response_opt.has_value()) {
+                            send_to_client(fd, response_opt.value());
+                        }
+                        clients[fd].buffer.clear();
                     }
                 } catch (const std::exception& e) {
                     std::cerr << e.what() << std::endl;
                 }
-                // We do not bulk messages yet: clear buffer
-                clients[fd].buffer.clear();
             } else {
                 std::cerr << "error on read: " << errno << std::endl;
             }
+        }
+        void send_to_client(const int& fd, const std::string& message) {
+            write(fd, message.c_str(), message.size()); // Respond back to client
         }
     };
 

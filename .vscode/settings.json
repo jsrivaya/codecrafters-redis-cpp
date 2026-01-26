@@ -67,7 +67,8 @@
         "charconv": "cpp",
         "__tree": "cpp",
         "map": "cpp",
-        "__memory": "cpp"
+        "__memory": "cpp",
+        "set": "cpp"
     },
     // Set the number of spaces a tab represents
     "editor.tabSize": 4,
