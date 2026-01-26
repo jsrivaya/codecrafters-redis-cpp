@@ -68,6 +68,7 @@ namespace redis {
         static constexpr size_t MAX_EVENTS = 10;
         static constexpr size_t MAX_CLIENTS = 10000;
         static constexpr size_t MAX_BUFFER_SIZE = 512 * 1024;  // 512KB limit
+        static constexpr size_t CACHE_SIZE = 10000;
 
         struct ClientConnection {
             int client_fd;
@@ -78,7 +79,7 @@ namespace redis {
         int epoll_fd;
         epoll_event events[MAX_EVENTS];
         struct sockaddr_in server_addr;
-        looneytools::LRUCache<std::string, DataPoint> cache{10000};
+        looneytools::LRUCache<std::string, DataPoint> cache{CACHE_SIZE};
         std::unordered_map<int, ClientConnection> clients;
 
         RedisServer() {
@@ -172,9 +173,7 @@ namespace redis {
                 auto& data = data_ref->get();
                 auto now = std::chrono::steady_clock::now();
                 auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-                auto entry_expire_time = data.timestamp + std::chrono::milliseconds(data.expiry_ms);
-                auto entry_expire_time_ms =
-                    std::chrono::duration_cast<std::chrono::milliseconds>(entry_expire_time.time_since_epoch()).count();                
+                auto entry_expire_time = data.timestamp + std::chrono::milliseconds(data.expiry_ms);             
                 if (data.expiry_ms > 0 && now >= entry_expire_time)
                     return get_null_bulk_string();
 
@@ -213,9 +212,7 @@ namespace redis {
                     expiry_ms = px_ms_int;
                 }
             }
-
-            DataPoint data{value, std::chrono::steady_clock::now(), expiry_ms};
-            cache.put(key, data);
+            cache.put(key, DataPoint{value, std::chrono::steady_clock::now(), expiry_ms});
 
             return get_simple_string("+OK");
         }
@@ -248,8 +245,7 @@ namespace redis {
                     }
                     insert_fn(*list, value);
                 } else {
-                    DataPoint data{std::vector<std::string>{value}, std::chrono::steady_clock::now(), expiry_ms};
-                    cache.put(key, data);
+                    cache.put(key, DataPoint{std::vector<std::string>{value}, std::chrono::steady_clock::now(), expiry_ms});
                 }
             }
 
@@ -298,6 +294,9 @@ namespace redis {
             while (args.size() > 1) {
                 keys.emplace_back(std::move(args.front()));
                 args.pop();
+            }
+            if (keys.empty()) {
+                return get_simple_string("-ERR wrong number of arguments for 'blpop' command");
             }
 
             size_t size;
@@ -436,43 +435,12 @@ namespace redis {
             }
             return result;
         }
-
-        std::string get_null_bulk_string() {
-            return "$-1\r\n";
-        }
-        std::string get_bulk_string(const std::string& s) {
-            return "$" + std::to_string(s.length()) + "\r\n" + s + "\r\n";
-        }
-        std::string get_simple_string(const std::string& s) {
-            return s + "\r\n";
-        }
-        std::string get_resp_int(const std::string& s) {
-            return ":" + s + "\r\n";
-        }
-        std::string get_resp_array_string(const std::vector<std::string>& elements) {
-            auto resp_array = "*" + std::to_string(elements.size()) + "\r\n";
-            for (const auto& e : elements) {
-                resp_array += get_bulk_string(e);
-            }
-            return resp_array;
-        }
-        std::string get_empty_resp_array() {
-            return "*0\r\n";
-        }
-        std::string get_null_resp_array() {
-            return "*-1\r\n";
-        }
         int make_socket_non_blocking(int socket_fd) {
             int flags = fcntl(socket_fd, F_GETFL, 0);
             if (flags == -1)
                 return -1;
             flags |= O_NONBLOCK;
             return fcntl(socket_fd, F_SETFL, flags);
-        }
-        std::optional<std::string> has_expected_args(std::queue<std::string>& args, const size_t expected) {
-          if(args.size() < expected)
-              return "-ERR wrong number of arguments";
-          return std::nullopt;
         }
         void remove_client(const int fd) {
             close(fd);
@@ -504,30 +472,30 @@ namespace redis {
         }
 
         std::optional<std::string> handle_client_message(const int client_fd, const std::string& message) {
-            auto resp_array = get_resp_array(message);
+            auto request = get_request(message);
 
-            auto command = resp_array.front();
-            resp_array.pop();
+            auto command = request.front();
+            request.pop();
             if (command == "BLPOP")
-                return blpop(client_fd, resp_array);
+                return blpop(client_fd, request);
             if (command == "ECHO")
-                return echo(resp_array);
+                return echo(request);
             if (command == "PING")
                 return ping();
             if (command == "GET")
-                return get(resp_array);
+                return get(request);
             if (command == "LLEN")
-                return llen(resp_array);
+                return llen(request);
             if (command == "LPOP")
-                return lpop(resp_array);
+                return lpop(request);
             if (command == "LPUSH")
-                return lpush(resp_array);
+                return lpush(request);
             if (command == "LRANGE")
-                return lrange(resp_array);
+                return lrange(request);
             if (command == "SET")
-                return set(resp_array);
+                return set(request);
             if (command == "RPUSH")
-                return rpush(resp_array);
+                return rpush(request);
 
             throw std::runtime_error("unknown_command");
         }
@@ -558,7 +526,7 @@ namespace redis {
             }
         }
         bool has_blocked_client(const std::string& key) {
-            return key_to_blocked_clients.find(key) != key_to_blocked_clients.end();
+            return key_to_blocked_clients.contains(key);
         }
         void unblock_and_handoff_value(const std::string& key, const std::string& value) {
             auto range = key_to_blocked_clients.equal_range(key);
@@ -573,8 +541,10 @@ namespace redis {
         }
         void cleanup_blocked_client(const int fd) {
             // Remove this client from ALL key registrations
-            blocked_fds.erase(fd);
+            // 1. priority_queue: blocked_clients_pq
+            // Lazy clean up for the priority queue
 
+            // 2. unordered_multimap: key -> client fd
             auto it = fd_to_keys.find(fd);
             if (it == fd_to_keys.end()) return;
             for (const auto& key : it->second) {
@@ -587,6 +557,9 @@ namespace redis {
                     ++kt;
                 }
             }
+            // 3. unordered_set: blocked fds
+            blocked_fds.erase(fd);
+            // 4. unordered_map: client fd -> key
             fd_to_keys.erase(fd);
         }
         void cleanup_timeout_clients() {
@@ -644,7 +617,11 @@ namespace redis {
             }
         }
         void send_to_client(const int& fd, const std::string& message) {
-            write(fd, message.c_str(), message.size()); // Respond back to client
+            if (write(fd, message.c_str(), message.size()) < 0) { // Respond back to client
+                // Client likely disconnected, clean up
+                std::cerr << "Failed to write to client " << fd << std::endl;
+                remove_client(fd);
+            }
         }
     };
 

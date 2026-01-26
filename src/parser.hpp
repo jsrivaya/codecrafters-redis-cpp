@@ -92,7 +92,7 @@ namespace redis {
     // RESP strings can include multiple arrays
     // each array represent one command and its arguments
     // in the future this should read resp arrays (commands)
-    std::queue<std::string> get_resp_array(const std::string& resp) {
+    std::queue<std::string> get_request(const std::string& resp) {
         // read "*"
         // read n
         // read n bytes
@@ -161,5 +161,30 @@ namespace redis {
         }
 
         return true;
+    }
+    std::string get_null_bulk_string() {
+            return "$-1\r\n";
+    }
+    std::string get_bulk_string(const std::string& s) {
+        return "$" + std::to_string(s.length()) + "\r\n" + s + "\r\n";
+    }
+    std::string get_simple_string(const std::string& s) {
+        return s + "\r\n";
+    }
+    std::string get_resp_int(const std::string& s) {
+        return ":" + s + "\r\n";
+    }
+    std::string get_resp_array_string(const std::vector<std::string>& elements) {
+        auto resp_array = "*" + std::to_string(elements.size()) + "\r\n";
+        for (const auto& e : elements) {
+            resp_array += get_bulk_string(e);
+        }
+        return resp_array;
+    }
+    std::string get_empty_resp_array() {
+        return "*0\r\n";
+    }
+    std::string get_null_resp_array() {
+        return "*-1\r\n";
     }
 } // namespace redis
