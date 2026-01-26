@@ -231,7 +231,7 @@ namespace redis {
                 auto value = args.front();
                 args.pop();
 
-                if (has_blocked_client(key)) {
+                if (key_to_blocked_clients.contains(key)) {
                     unblock_and_handoff_value(key, value);
                     continue;
                 }
@@ -524,9 +524,6 @@ namespace redis {
             for (const auto& key : keys) {  // Register for ALL keys, even non-existent
                 key_to_blocked_clients.emplace(key, fd);
             }
-        }
-        bool has_blocked_client(const std::string& key) {
-            return key_to_blocked_clients.contains(key);
         }
         void unblock_and_handoff_value(const std::string& key, const std::string& value) {
             auto range = key_to_blocked_clients.equal_range(key);
