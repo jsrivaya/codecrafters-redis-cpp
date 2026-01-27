@@ -47,18 +47,18 @@ namespace redis {
 
     class RedisServer {
       public:
-      /**
-       * @brief Get the The Server object instance
-       * 
-       * @return RedisServer& instance
-       */
+        /**
+         * @brief Get the The Server object instance
+         *
+         * @return RedisServer& instance
+         */
         static RedisServer& GetTheServer() {
             static RedisServer the_server;
             return the_server;
         }
         /**
          * @brief run Redis server, wait for and handle requests
-         * 
+         *
          */
         void run() {
             while (true) {
@@ -78,7 +78,7 @@ namespace redis {
       private:
         static constexpr size_t MAX_EVENTS = 10;
         static constexpr size_t MAX_CLIENTS = 10000;
-        static constexpr size_t MAX_BUFFER_SIZE = 512 * 1024;  // 512KB limit
+        static constexpr size_t MAX_BUFFER_SIZE = 512 * 1024; // 512KB limit
         static constexpr size_t CACHE_SIZE = 10000;
 
         struct ClientConnection {
@@ -130,8 +130,10 @@ namespace redis {
         RedisServer(const RedisServer&) = delete;
         RedisServer& operator=(const RedisServer&) = delete;
         ~RedisServer() {
-            if (epoll_fd != -1) close(epoll_fd);
-            if (server_fd != -1) close(server_fd);
+            if (epoll_fd != -1)
+                close(epoll_fd);
+            if (server_fd != -1)
+                close(server_fd);
         }
 
         void init_epoll() {
@@ -150,7 +152,7 @@ namespace redis {
                 auto earliest_timeout = blocked_clients_pq.top().timeout_point;
                 auto duration = earliest_timeout - now;
                 timeout_ms = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
-                timeout_ms = std::max(0, timeout_ms);  // Clamp to 0 if negative
+                timeout_ms = std::max(0, timeout_ms); // Clamp to 0 if negative
             }
             return epoll_wait(epoll_fd, events, MAX_EVENTS, timeout_ms);
         }
@@ -213,7 +215,7 @@ namespace redis {
                 auto data_ref = cache.get(key);
                 auto& data = data_ref->get();
                 auto now = std::chrono::steady_clock::now();
-                auto entry_expire_time = data.timestamp + std::chrono::milliseconds(data.expiry_ms);             
+                auto entry_expire_time = data.timestamp + std::chrono::milliseconds(data.expiry_ms);
                 if (data.expiry_ms > 0 && now >= entry_expire_time)
                     return get_null_bulk_string();
 
@@ -235,7 +237,7 @@ namespace redis {
 
             unsigned expiry_ms = 0; // default value
 
-            if(auto data_ref = cache.get(key);
+            if (auto data_ref = cache.get(key);
                 data_ref && !std::holds_alternative<std::string>(data_ref->get().value)) {
                 return get_error_string("WRONGTYPE Operation against a key holding the wrong kind of value");
             }
@@ -259,12 +261,8 @@ namespace redis {
 
         std::map<DataType, std::string> datatype_to_string = {
             // incomplete set of types (not all are supported)
-            {DataType::STRING, "string"},
-            {DataType::LIST, "list"},
-            {DataType::SET, "set"},
-            {DataType::ZSET, "zset"},
-            {DataType::HASH, "hash"},
-            {DataType::STREAM, "stream"},
+            {DataType::STRING, "string"},  {DataType::LIST, "list"}, {DataType::SET, "set"},
+            {DataType::ZSET, "zset"},      {DataType::HASH, "hash"}, {DataType::STREAM, "stream"},
             {DataType::VSET, "vectorset"},
         };
 
@@ -276,14 +274,13 @@ namespace redis {
                 const auto datatype_str = datatype_to_string[datatype];
                 return get_simple_string(datatype_str);
             }
-            
+
             return (get_simple_string("none"));
         }
 
-        std::string push_w_func(
-            std::queue<std::string>& args,
-            std::function<void(RedisList<std::string>&, const std::string&)> insert_fn) {
-            if(args.size() < 2) {
+        std::string push_w_func(std::queue<std::string>& args,
+                                std::function<void(RedisList<std::string>&, const std::string&)> insert_fn) {
+            if (args.size() < 2) {
                 return get_error_string("ERR wrong number of arguments for 'push' command");
             }
 
@@ -300,7 +297,7 @@ namespace redis {
                 }
 
                 unsigned expiry_ms = 0; // default value
-                if(auto data_ref = cache.get(key); data_ref) {
+                if (auto data_ref = cache.get(key)) {
                     auto& data = data_ref->get();
                     auto list = std::get_if<RedisList<std::string>>(&data.value);
                     if (list == nullptr) {
@@ -308,11 +305,12 @@ namespace redis {
                     }
                     insert_fn(*list, value);
                 } else {
-                    cache.put(key, DataPoint{RedisList<std::string>({value}), DataType::LIST, std::chrono::steady_clock::now(), expiry_ms});
+                    cache.put(key, DataPoint{RedisList<std::string>({value}), DataType::LIST,
+                                             std::chrono::steady_clock::now(), expiry_ms});
                 }
             }
 
-            if(auto data_ref = cache.get(key)) {
+            if (auto data_ref = cache.get(key)) {
                 auto list = std::get_if<RedisList<std::string>>(&data_ref->get().value);
                 return get_resp_int(std::to_string(list->size()));
             }
@@ -320,17 +318,15 @@ namespace redis {
         }
         // RPUSH key value_1 ... value_n
         std::string rpush(std::queue<std::string>& args) {
-            return push_w_func(args,
-                [](RedisList<std::string>& list, const std::string& value) {
-                    list.rpush(value);
-              });
+            return push_w_func(args, [](RedisList<std::string>& list, const std::string& value) {
+                list.rpush(value);
+            });
         }
         // LPUSH key_list value_1 ... value_n (value_n ... value_1)
         std::string lpush(std::queue<std::string>& args) {
-            return push_w_func(args,
-                [](RedisList<std::string>& list, const std::string& value) {
-                    list.lpush(value);
-              });
+            return push_w_func(args, [](RedisList<std::string>& list, const std::string& value) {
+                list.lpush(value);
+            });
         }
 
         // LLEN key
@@ -340,7 +336,7 @@ namespace redis {
             }
 
             const auto key = args.front();
-            if (auto data_ref = cache.get(key); data_ref) {
+            if (auto data_ref = cache.get(key)) {
                 auto& data = data_ref->get();
                 auto list = std::get_if<RedisList<std::string>>(&data.value);
                 if (list == nullptr) {
@@ -382,7 +378,7 @@ namespace redis {
 
             for (const auto& key : keys) {
                 // pop and return the first value available in any of the keys
-                if (auto data_ref = cache.get(key); data_ref) {
+                if (auto data_ref = cache.get(key)) {
                     auto& data = data_ref->get();
                     auto list = std::get_if<RedisList<std::string>>(&data.value);
                     if (!list) {
@@ -396,7 +392,7 @@ namespace redis {
             // none of the lists has values - block
             block_client(fd, keys, timeout_point);
 
-            return "";  // Don't send response yet  
+            return ""; // Don't send response yet
         }
 
         // LPOP key
@@ -413,7 +409,7 @@ namespace redis {
                 auto arg = args.front();
                 size_t pos;
                 npop = std::stoi(arg, &pos);
-                if(pos != arg.length()) {
+                if (pos != arg.length()) {
                     return get_error_string("WRONGTYPE Operation requesting the wrong kind of argument");
                 }
                 if (npop <= 0) {
@@ -421,7 +417,7 @@ namespace redis {
                 }
             }
 
-            if (auto data_ref = cache.get(key); data_ref) {
+            if (auto data_ref = cache.get(key)) {
                 auto& data = data_ref->get();
                 auto list = std::get_if<RedisList<std::string>>(&data.value);
                 if (list == nullptr) {
@@ -443,7 +439,7 @@ namespace redis {
 
         // LRANGE key start stop
         std::string lrange(std::queue<std::string>& args) {
-            if(args.size() != 3) {
+            if (args.size() != 3) {
                 return get_error_string("ERR wrong number of arguments for 'lrange' command");
             }
 
@@ -451,7 +447,9 @@ namespace redis {
             args.pop();
 
             auto data_ref = cache.get(key);
-            if(!data_ref) { return get_empty_resp_array(); }
+            if (!data_ref) {
+                return get_empty_resp_array();
+            }
 
             auto start = args.front();
             args.pop();
@@ -459,7 +457,7 @@ namespace redis {
             args.pop();
             if (!is_integer(start) || !is_integer(end))
                 return get_error_string("ERR value is not an integer or out of range");
-            
+
             auto start_i = std::stoi(start);
             auto end_i = std::stoi(end);
 
@@ -509,7 +507,7 @@ namespace redis {
         struct BlockedClient {
             int fd;
             std::chrono::steady_clock::time_point timeout_point;
-            std::vector<std::string> keys;  // All keys this client is waiting on
+            std::vector<std::string> keys; // All keys this client is waiting on
             bool operator>(const BlockedClient& other) const {
                 return timeout_point > other.timeout_point;
             }
@@ -523,12 +521,13 @@ namespace redis {
         // 4. client fd to key for quick find of blocked clients
         std::unordered_map<int, std::vector<std::string>> fd_to_keys;
 
-        void block_client(const int fd, std::vector<std::string>& keys, const std::chrono::steady_clock::time_point timeout_point) {
+        void block_client(const int fd, std::vector<std::string>& keys,
+                          const std::chrono::steady_clock::time_point timeout_point) {
             blocked_clients_pq.push(BlockedClient{fd, timeout_point, keys});
             blocked_fds.insert(fd);
             fd_to_keys[fd] = keys;
 
-            for (const auto& key : keys) {  // Register for ALL keys, even non-existent
+            for (const auto& key : keys) { // Register for ALL keys, even non-existent
                 key_to_blocked_clients.emplace(key, fd);
             }
         }
@@ -550,10 +549,11 @@ namespace redis {
 
             // 2. unordered_multimap: key -> client fd
             auto it = fd_to_keys.find(fd);
-            if (it == fd_to_keys.end()) return;
+            if (it == fd_to_keys.end())
+                return;
             for (const auto& key : it->second) {
                 auto range = key_to_blocked_clients.equal_range(key);
-                for (auto kt = range.first; kt != range.second; ) {
+                for (auto kt = range.first; kt != range.second;) {
                     if (kt->second == fd) {
                         kt = key_to_blocked_clients.erase(kt);
                         break;
@@ -572,7 +572,7 @@ namespace redis {
 
                 // Check if already expired
                 if (blocked.timeout_point > std::chrono::steady_clock::now()) {
-                    break;  // No more timeouts yet
+                    break; // No more timeouts yet
                 }
 
                 // Timeout expired - but check if client is still actually blocked
@@ -583,7 +583,7 @@ namespace redis {
                 }
                 // else: Client was already unblocked by data arrival - skip
 
-                blocked_clients_pq.pop();  // Remove (either handled or stale)
+                blocked_clients_pq.pop(); // Remove (either handled or stale)
             }
         }
 

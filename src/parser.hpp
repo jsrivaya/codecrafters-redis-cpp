@@ -33,8 +33,7 @@ namespace redis {
             int n = 0;
             while (index < resp.length() && std::isdigit(resp[index])) {
                 int digit = resp[index] - '0';
-                if (n > MAX_ARRAY_SIZE / 10 ||
-                    (n == MAX_ARRAY_SIZE / 10 && digit > MAX_ARRAY_SIZE % 10)) {
+                if (n > MAX_ARRAY_SIZE / 10 || (n == MAX_ARRAY_SIZE / 10 && digit > MAX_ARRAY_SIZE % 10)) {
                     throw std::runtime_error("Array size exceeds maximum allowed");
                 }
                 n = n * 10 + digit;
@@ -61,8 +60,7 @@ namespace redis {
         constexpr int MAX_ARRAY_SIZE = 1000000;
         while (index < resp.length() && std::isdigit(resp[index])) {
             int digit = resp[index] - '0';
-            if (n > MAX_ARRAY_SIZE / 10 ||
-                (n == MAX_ARRAY_SIZE / 10 && digit > MAX_ARRAY_SIZE % 10)) {
+            if (n > MAX_ARRAY_SIZE / 10 || (n == MAX_ARRAY_SIZE / 10 && digit > MAX_ARRAY_SIZE % 10)) {
                 throw std::runtime_error("Array size exceeds maximum allowed");
             }
             n = n * 10 + digit;
@@ -126,7 +124,7 @@ namespace redis {
         constexpr int MAX_ARRAY_SIZE = 1000000;
         while (pos < buffer.size() && std::isdigit(buffer[pos])) {
             if (array_size > MAX_ARRAY_SIZE / 10) {
-                return false;  // Invalid message, too large
+                return false; // Invalid message, too large
             }
             array_size = array_size * 10 + (buffer[pos] - '0');
             ++pos;
@@ -144,7 +142,7 @@ namespace redis {
             auto param_size = 0;
             while (pos < buffer.size() && std::isdigit(buffer[pos])) {
                 if (param_size > MAX_ARRAY_SIZE / 10) {
-                    return false;  // Invalid message
+                    return false; // Invalid message
                 }
                 param_size = param_size * 10 + (buffer[pos] - '0');
                 ++pos;
@@ -163,7 +161,7 @@ namespace redis {
         return true;
     }
     std::string get_null_bulk_string() {
-            return "$-1\r\n";
+        return "$-1\r\n";
     }
     std::string get_bulk_string(const std::string& s) {
         return "$" + std::to_string(s.length()) + "\r\n" + s + "\r\n";
@@ -181,7 +179,7 @@ namespace redis {
         return "*0\r\n";
     }
     std::string get_resp_array_string(const std::vector<std::string>& elements) {
-        if(elements.empty()) {
+        if (elements.empty()) {
             return get_empty_resp_array();
         }
         auto resp_array = "*" + std::to_string(elements.size()) + "\r\n";
