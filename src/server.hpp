@@ -405,24 +405,6 @@ namespace redis {
             if (list == nullptr) {
                 return get_simple_string("-WRONGTYPE Operation against a key holding the wrong kind of value");
             }
-            // list[0,1,2,3]: size() = 4
-            // lrange list 2 4: "*2\r\n1\r\n2\r\n$1\r\n3\r\n"
-            // start_i = start_i < 0 ? list->size() + start_i : start_i;
-            // end_i = end_i < 0 ? list->size() + end_i : end_i;
-
-            // // Check if range is valid
-            // if (start_i > end_i || start_i >= (int)list->size() || end_i < 0) {
-            //     return get_empty_resp_array();
-            // }
-            // // Clamp to list bounds
-            // start_i = std::max(0, start_i);
-            // end_i = std::min(end_i, (int)list->size() - 1);
-
-            // auto result = "*" + std::to_string(end_i - start_i + 1) + "\r\n";
-            // for (auto i = start_i; i<=end_i; ++i) {
-            //     result += "$" + std::to_string(list->at(i).size()) + "\r\n";
-            //     result += list->at(i) + "\r\n";
-            // }
             auto result = get_resp_array_string(list->lrange(start_i, end_i));
             return result;
         }
