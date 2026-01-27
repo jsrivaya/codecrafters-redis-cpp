@@ -12,16 +12,20 @@ public:
     explicit LRUCache(size_t size) : capacity(size) {}
 
     std::optional<std::reference_wrapper<V>> get(const K& key) {
-        if(map.find(key) == map.end())
+        const auto it = map.find(key);
+        if(it == map.end())
             return std::nullopt;
 
         setMRU(key);
-        return map[key]->second;
+        const auto store_entry_itr = it->second;
+        return store_entry_itr->second;
     }
     void put(const K& key, const V& value) {
-        if(map.find(key) != map.end()) {
-           map[key]->second = value;
-           setMRU(key);
+        const auto it = map.find(key);
+        if(it!= map.end()) {
+            auto store_entry_itr = it->second;
+            store_entry_itr->second = value;
+            setMRU(key);
         } else {
             if(capacity == store.size()) {
                 map.erase(store.back().first);
@@ -37,7 +41,14 @@ public:
     }
 
     void remove(const K& key) {
-        map.erase(key);
+        const auto it = map.find(key);
+        if (it == map.end()) return;
+        store.erase(it->second);
+        map.erase(it);
+    }
+
+    size_t size() const {
+        return store.size();
     }
 
 private:
