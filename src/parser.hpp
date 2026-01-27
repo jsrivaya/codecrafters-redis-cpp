@@ -169,7 +169,10 @@ namespace redis {
         return "$" + std::to_string(s.length()) + "\r\n" + s + "\r\n";
     }
     std::string get_simple_string(const std::string& s) {
-        return s + "\r\n";
+        return "+" + s + "\r\n";
+    }
+    std::string get_error_string(const std::string& s) {
+        return "-" + s + "\r\n";
     }
     std::string get_resp_int(const std::string& s) {
         return ":" + s + "\r\n";

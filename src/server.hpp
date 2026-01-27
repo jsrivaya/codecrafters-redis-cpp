@@ -12,6 +12,7 @@
 #include <sys/fcntl.h>
 #include <sys/socket.h>
 
+#include <map>
 #include <queue>
 #include <string>
 #include <string_view>
@@ -39,17 +40,26 @@ namespace redis {
 
     struct DataPoint {
         RedisValue value;
+        DataType datatype;
         std::chrono::steady_clock::time_point timestamp;
         unsigned expiry_ms;
     };
 
     class RedisServer {
       public:
+      /**
+       * @brief Get the The Server object instance
+       * 
+       * @return RedisServer& instance
+       */
         static RedisServer& GetTheServer() {
             static RedisServer the_server;
             return the_server;
         }
-
+        /**
+         * @brief run Redis server, wait for and handle requests
+         * 
+         */
         void run() {
             while (true) {
                 cleanup_timeout_clients();
@@ -152,6 +162,36 @@ namespace redis {
             epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &event);
             clients[fd] = ClientConnection{fd, ""};
         }
+        std::optional<std::string> handle_client_message(const int client_fd, const std::string& message) {
+            auto request = get_request(message);
+
+            auto command = request.front();
+            request.pop();
+            if (command == "BLPOP")
+                return blpop(client_fd, request);
+            if (command == "ECHO")
+                return echo(request);
+            if (command == "PING")
+                return ping();
+            if (command == "GET")
+                return get(request);
+            if (command == "LLEN")
+                return llen(request);
+            if (command == "LPOP")
+                return lpop(request);
+            if (command == "LPUSH")
+                return lpush(request);
+            if (command == "LRANGE")
+                return lrange(request);
+            if (command == "SET")
+                return set(request);
+            if (command == "RPUSH")
+                return rpush(request);
+            if (command == "TYPE")
+                return type(request);
+
+            throw std::runtime_error("unknown_command");
+        }
 
         std::string ping() {
             return "+PONG\r\n";
@@ -178,7 +218,7 @@ namespace redis {
                     return get_null_bulk_string();
 
                 if (!std::holds_alternative<std::string>(data.value)) {
-                    return get_simple_string("-WRONGTYPE Operation against a key holding the wrong kind of value");
+                    return get_error_string("WRONGTYPE Operation against a key holding the wrong kind of value");
                 }
                 return get_bulk_string(std::get<std::string>(data.value));
             }
@@ -197,7 +237,7 @@ namespace redis {
 
             if(auto data_ref = cache.get(key);
                 data_ref && !std::holds_alternative<std::string>(data_ref->get().value)) {
-                return get_simple_string("-WRONGTYPE Operation against a key holding the wrong kind of value");
+                return get_error_string("WRONGTYPE Operation against a key holding the wrong kind of value");
             }
 
             // parse options: essentially expiry time
@@ -212,16 +252,39 @@ namespace redis {
                     expiry_ms = px_ms_int;
                 }
             }
-            cache.put(key, DataPoint{value, std::chrono::steady_clock::now(), expiry_ms});
+            cache.put(key, DataPoint{value, DataType::STRING, std::chrono::steady_clock::now(), expiry_ms});
 
-            return get_simple_string("+OK");
+            return get_simple_string("OK");
+        }
+
+        std::map<DataType, std::string> datatype_to_string = {
+            // incomplete set of types (not all are supported)
+            {DataType::STRING, "string"},
+            {DataType::LIST, "list"},
+            {DataType::SET, "set"},
+            {DataType::ZSET, "zset"},
+            {DataType::HASH, "hash"},
+            {DataType::STREAM, "stream"},
+            {DataType::VSET, "vectorset"},
+        };
+
+        std::string type(std::queue<std::string>& args) {
+            const auto key = args.front();
+            args.pop();
+            if (auto data_ref = cache.get(key)) {
+                const auto& datatype = data_ref->get().datatype;
+                const auto datatype_str = datatype_to_string[datatype];
+                return get_simple_string(datatype_str);
+            }
+            
+            return (get_simple_string("none"));
         }
 
         std::string push_w_func(
             std::queue<std::string>& args,
             std::function<void(RedisList<std::string>&, const std::string&)> insert_fn) {
             if(args.size() < 2) {
-                return get_simple_string("-ERR wrong number of arguments for 'push' command");
+                return get_error_string("ERR wrong number of arguments for 'push' command");
             }
 
             const auto key = args.front();
@@ -241,15 +304,15 @@ namespace redis {
                     auto& data = data_ref->get();
                     auto list = std::get_if<RedisList<std::string>>(&data.value);
                     if (list == nullptr) {
-                        return get_simple_string("-WRONGTYPE Operation against a key holding the wrong kind of value");
+                        return get_error_string("WRONGTYPE Operation against a key holding the wrong kind of value");
                     }
                     insert_fn(*list, value);
                 } else {
-                    cache.put(key, DataPoint{RedisList<std::string>({value}), std::chrono::steady_clock::now(), expiry_ms});
+                    cache.put(key, DataPoint{RedisList<std::string>({value}), DataType::LIST, std::chrono::steady_clock::now(), expiry_ms});
                 }
             }
 
-            if(auto data_ref = cache.get(key); data_ref) {
+            if(auto data_ref = cache.get(key)) {
                 auto list = std::get_if<RedisList<std::string>>(&data_ref->get().value);
                 return get_resp_int(std::to_string(list->size()));
             }
@@ -273,7 +336,7 @@ namespace redis {
         // LLEN key
         std::string llen(std::queue<std::string>& args) {
             if (args.size() != 1) {
-                return get_simple_string("-ERR wrong number of arguments for 'llen' command");
+                return get_error_string("ERR wrong number of arguments for 'llen' command");
             }
 
             const auto key = args.front();
@@ -281,7 +344,7 @@ namespace redis {
                 auto& data = data_ref->get();
                 auto list = std::get_if<RedisList<std::string>>(&data.value);
                 if (list == nullptr) {
-                    return get_simple_string("-WRONGTYPE Operation against a key holding the wrong kind of value");
+                    return get_error_string("WRONGTYPE Operation against a key holding the wrong kind of value");
                 }
                 return get_resp_int(std::to_string(list->llen()));
             }
@@ -296,7 +359,7 @@ namespace redis {
                 args.pop();
             }
             if (keys.empty()) {
-                return get_simple_string("-ERR wrong number of arguments for 'blpop' command");
+                return get_error_string("ERR wrong number of arguments for 'blpop' command");
             }
 
             size_t size;
@@ -305,7 +368,7 @@ namespace redis {
 
             auto timeout_s = std::stod(arg, &size);
             if (size != arg.length()) {
-                return get_simple_string("-ERR timeout is not a valid float");
+                return get_error_string("ERR timeout is not a valid float");
             }
             std::chrono::steady_clock::time_point timeout_point;
             if (timeout_s == 0) {
@@ -323,7 +386,7 @@ namespace redis {
                     auto& data = data_ref->get();
                     auto list = std::get_if<RedisList<std::string>>(&data.value);
                     if (!list) {
-                        return get_simple_string("-WRONGTYPE Operation against a key holding the wrong kind of value");
+                        return get_error_string("WRONGTYPE Operation against a key holding the wrong kind of value");
                     }
                     if (auto value = list->lpop()) {
                         return get_resp_array_string({key, *value});
@@ -339,7 +402,7 @@ namespace redis {
         // LPOP key
         std::string lpop(std::queue<std::string>& args) {
             if (args.size() > 2) {
-                return get_simple_string("-ERR wrong number of arguments for 'lpop' command");
+                return get_error_string("ERR wrong number of arguments for 'lpop' command");
             }
             auto npop = 1; // default number of elements to pop
 
@@ -351,10 +414,10 @@ namespace redis {
                 size_t pos;
                 npop = std::stoi(arg, &pos);
                 if(pos != arg.length()) {
-                    return get_simple_string("-WRONGTYPE Operation requesting the wrong kind of argument");
+                    return get_error_string("WRONGTYPE Operation requesting the wrong kind of argument");
                 }
                 if (npop <= 0) {
-                    return get_simple_string("-ERR value is out of range, must be positive");
+                    return get_error_string("ERR value is out of range, must be positive");
                 }
             }
 
@@ -362,7 +425,7 @@ namespace redis {
                 auto& data = data_ref->get();
                 auto list = std::get_if<RedisList<std::string>>(&data.value);
                 if (list == nullptr) {
-                    return get_simple_string("-WRONGTYPE Operation against a key holding the wrong kind of value");
+                    return get_error_string("WRONGTYPE Operation against a key holding the wrong kind of value");
                 }
                 if (list->empty()) {
                     cache.remove(key);
@@ -381,7 +444,7 @@ namespace redis {
         // LRANGE key start stop
         std::string lrange(std::queue<std::string>& args) {
             if(args.size() != 3) {
-                return get_simple_string("-ERR wrong number of arguments for 'lrange' command");
+                return get_error_string("ERR wrong number of arguments for 'lrange' command");
             }
 
             const auto key = args.front();
@@ -395,7 +458,7 @@ namespace redis {
             auto end = args.front();
             args.pop();
             if (!is_integer(start) || !is_integer(end))
-                return get_simple_string("-ERR value is not an integer or out of range");
+                return get_error_string("ERR value is not an integer or out of range");
             
             auto start_i = std::stoi(start);
             auto end_i = std::stoi(end);
@@ -403,7 +466,7 @@ namespace redis {
             auto& data = data_ref->get();
             auto list = std::get_if<RedisList<std::string>>(&data.value);
             if (list == nullptr) {
-                return get_simple_string("-WRONGTYPE Operation against a key holding the wrong kind of value");
+                return get_error_string("WRONGTYPE Operation against a key holding the wrong kind of value");
             }
             auto result = get_resp_array_string(list->lrange(start_i, end_i));
             return result;
@@ -442,35 +505,6 @@ namespace redis {
             } else {
                 throw std::runtime_error("redis server: failed to handle max connections");
             }
-        }
-
-        std::optional<std::string> handle_client_message(const int client_fd, const std::string& message) {
-            auto request = get_request(message);
-
-            auto command = request.front();
-            request.pop();
-            if (command == "BLPOP")
-                return blpop(client_fd, request);
-            if (command == "ECHO")
-                return echo(request);
-            if (command == "PING")
-                return ping();
-            if (command == "GET")
-                return get(request);
-            if (command == "LLEN")
-                return llen(request);
-            if (command == "LPOP")
-                return lpop(request);
-            if (command == "LPUSH")
-                return lpush(request);
-            if (command == "LRANGE")
-                return lrange(request);
-            if (command == "SET")
-                return set(request);
-            if (command == "RPUSH")
-                return rpush(request);
-
-            throw std::runtime_error("unknown_command");
         }
         struct BlockedClient {
             int fd;
