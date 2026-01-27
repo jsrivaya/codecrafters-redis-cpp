@@ -1,8 +1,9 @@
 #pragma once
 
 #include "logger.hpp"
-#include "parser.hpp"
 #include "lru.hpp"
+#include "parser.hpp"
+#include "redis_list.hpp"
 #include "utils.hpp"
 
 #include <arpa/inet.h>
@@ -34,7 +35,7 @@ namespace redis {
         PROB,       // Probabilistic types: Including HyperLogLog, Bloom filters, and more.,
     };
 
-    using RedisValue = std::variant<std::string, std::vector<std::string>>;
+    using RedisValue = std::variant<std::string, RedisList<std::string>>;
 
     struct DataPoint {
         RedisValue value;
@@ -172,7 +173,6 @@ namespace redis {
                 auto data_ref = cache.get(key);
                 auto& data = data_ref->get();
                 auto now = std::chrono::steady_clock::now();
-                auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
                 auto entry_expire_time = data.timestamp + std::chrono::milliseconds(data.expiry_ms);             
                 if (data.expiry_ms > 0 && now >= entry_expire_time)
                     return get_null_bulk_string();
@@ -219,7 +219,7 @@ namespace redis {
 
         std::string push_w_func(
             std::queue<std::string>& args,
-            std::function<void(std::vector<std::string>&, const std::string&)> insert_fn) {
+            std::function<void(RedisList<std::string>&, const std::string&)> insert_fn) {
             if(args.size() < 2) {
                 return get_simple_string("-ERR wrong number of arguments for 'push' command");
             }
@@ -239,18 +239,18 @@ namespace redis {
                 unsigned expiry_ms = 0; // default value
                 if(auto data_ref = cache.get(key); data_ref) {
                     auto& data = data_ref->get();
-                    auto list = std::get_if<std::vector<std::string>>(&data.value);
+                    auto list = std::get_if<RedisList<std::string>>(&data.value);
                     if (list == nullptr) {
                         return get_simple_string("-WRONGTYPE Operation against a key holding the wrong kind of value");
                     }
                     insert_fn(*list, value);
                 } else {
-                    cache.put(key, DataPoint{std::vector<std::string>{value}, std::chrono::steady_clock::now(), expiry_ms});
+                    cache.put(key, DataPoint{RedisList<std::string>({value}), std::chrono::steady_clock::now(), expiry_ms});
                 }
             }
 
             if(auto data_ref = cache.get(key); data_ref) {
-                auto list = std::get_if<std::vector<std::string>>(&cache.get(key)->get().value);
+                auto list = std::get_if<RedisList<std::string>>(&data_ref->get().value);
                 return get_resp_int(std::to_string(list->size()));
             }
             return get_resp_int("1");
@@ -258,15 +258,15 @@ namespace redis {
         // RPUSH key value_1 ... value_n
         std::string rpush(std::queue<std::string>& args) {
             return push_w_func(args,
-                [](std::vector<std::string>& list, const std::string& value) {
-                    list.emplace_back(value);
+                [](RedisList<std::string>& list, const std::string& value) {
+                    list.rpush(value);
               });
         }
         // LPUSH key_list value_1 ... value_n (value_n ... value_1)
         std::string lpush(std::queue<std::string>& args) {
             return push_w_func(args,
-                [](std::vector<std::string>& list, const std::string& value) {
-                    list.insert(list.begin(), value);
+                [](RedisList<std::string>& list, const std::string& value) {
+                    list.lpush(value);
               });
         }
 
@@ -279,11 +279,11 @@ namespace redis {
             const auto key = args.front();
             if (auto data_ref = cache.get(key); data_ref) {
                 auto& data = data_ref->get();
-                auto list = std::get_if<std::vector<std::string>>(&data.value);
+                auto list = std::get_if<RedisList<std::string>>(&data.value);
                 if (list == nullptr) {
                     return get_simple_string("-WRONGTYPE Operation against a key holding the wrong kind of value");
                 }
-                return get_resp_int(std::to_string(list->size())); 
+                return get_resp_int(std::to_string(list->llen()));
             }
             return get_resp_int("0");
         }
@@ -321,14 +321,12 @@ namespace redis {
                 // pop and return the first value available in any of the keys
                 if (auto data_ref = cache.get(key); data_ref) {
                     auto& data = data_ref->get();
-                    auto list = std::get_if<std::vector<std::string>>(&data.value);
+                    auto list = std::get_if<RedisList<std::string>>(&data.value);
                     if (!list) {
                         return get_simple_string("-WRONGTYPE Operation against a key holding the wrong kind of value");
                     }
-                    if (!list->empty()) {
-                        const auto value = std::move(list->front());
-                        list->erase(list->begin());
-                        return get_resp_array_string({key,value});
+                    if (auto value = list->lpop()) {
+                        return get_resp_array_string({key, *value});
                     }
                 }
             }
@@ -362,7 +360,7 @@ namespace redis {
 
             if (auto data_ref = cache.get(key); data_ref) {
                 auto& data = data_ref->get();
-                auto list = std::get_if<std::vector<std::string>>(&data.value);
+                auto list = std::get_if<RedisList<std::string>>(&data.value);
                 if (list == nullptr) {
                     return get_simple_string("-WRONGTYPE Operation against a key holding the wrong kind of value");
                 }
@@ -371,15 +369,7 @@ namespace redis {
                     return get_null_bulk_string();
                 }
 
-                if (npop > list->size()) {
-                    npop = list->size();
-                }
-                std::vector<std::string> sublist(
-                    std::make_move_iterator(list->begin()),
-                    std::make_move_iterator(list->begin() + npop)
-                );
-                list->erase(list->begin(), list->begin() + npop);
-
+                auto sublist = list->lpop(npop);
                 if (sublist.size() > 1) {
                     return get_resp_array_string(sublist);
                 }
@@ -411,28 +401,29 @@ namespace redis {
             auto end_i = std::stoi(end);
 
             auto& data = data_ref->get();
-            auto list = std::get_if<std::vector<std::string>>(&data.value);
+            auto list = std::get_if<RedisList<std::string>>(&data.value);
             if (list == nullptr) {
                 return get_simple_string("-WRONGTYPE Operation against a key holding the wrong kind of value");
             }
             // list[0,1,2,3]: size() = 4
             // lrange list 2 4: "*2\r\n1\r\n2\r\n$1\r\n3\r\n"
-            start_i = start_i < 0 ? list->size() + start_i : start_i;
-            end_i = end_i < 0 ? list->size() + end_i : end_i;
+            // start_i = start_i < 0 ? list->size() + start_i : start_i;
+            // end_i = end_i < 0 ? list->size() + end_i : end_i;
 
-            // Check if range is valid
-            if (start_i > end_i || start_i >= (int)list->size() || end_i < 0) {
-                return get_empty_resp_array();
-            }
-            // Clamp to list bounds
-            start_i = std::max(0, start_i);
-            end_i = std::min(end_i, (int)list->size() - 1);
+            // // Check if range is valid
+            // if (start_i > end_i || start_i >= (int)list->size() || end_i < 0) {
+            //     return get_empty_resp_array();
+            // }
+            // // Clamp to list bounds
+            // start_i = std::max(0, start_i);
+            // end_i = std::min(end_i, (int)list->size() - 1);
 
-            auto result = "*" + std::to_string(end_i - start_i + 1) + "\r\n";
-            for (auto i = start_i; i<=end_i; ++i) {
-                result += "$" + std::to_string(list->at(i).size()) + "\r\n";
-                result += list->at(i) + "\r\n";
-            }
+            // auto result = "*" + std::to_string(end_i - start_i + 1) + "\r\n";
+            // for (auto i = start_i; i<=end_i; ++i) {
+            //     result += "$" + std::to_string(list->at(i).size()) + "\r\n";
+            //     result += list->at(i) + "\r\n";
+            // }
+            auto result = get_resp_array_string(list->lrange(start_i, end_i));
             return result;
         }
         int make_socket_non_blocking(int socket_fd) {
