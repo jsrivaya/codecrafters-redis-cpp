@@ -4,6 +4,7 @@
 #include "lru.hpp"
 #include "parser.hpp"
 #include "redis_list.hpp"
+#include "redis_string.hpp"
 #include "utils.hpp"
 
 #include <arpa/inet.h>
@@ -191,6 +192,8 @@ namespace redis {
                 return rpush(request);
             if (command == "TYPE")
                 return type(request);
+            if (command == "XADD")
+                return xadd(request);
 
             throw std::runtime_error("unknown_command");
         }
@@ -276,6 +279,10 @@ namespace redis {
             }
 
             return (get_simple_string("none"));
+        }
+
+        std::string xadd(std::queue<std::string>& args) {
+            return get_error_string("ERR unknown command 'xadd'");
         }
 
         std::string push_w_func(std::queue<std::string>& args,
