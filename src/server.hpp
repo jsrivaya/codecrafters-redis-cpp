@@ -7,8 +7,10 @@
 #include "redis_types.hpp"
 #include "utils.hpp"
 
+#include <algorithm>
 #include <arpa/inet.h>
 #include <functional>
+#include <ranges>
 #include <sys/epoll.h>
 #include <sys/fcntl.h>
 #include <sys/socket.h>
@@ -146,6 +148,9 @@ namespace redis {
 
             auto command = request.front();
             request.pop();
+            std::ranges::transform(command, command.begin(), [](unsigned char c) {
+                return std::toupper(c);
+            });
             if (command == "BLPOP")
                 return blpop(client_fd, request);
             if (command == "ECHO")
